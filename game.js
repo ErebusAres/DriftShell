@@ -1,0 +1,2835 @@
+"use strict";
+
+// HackTerm: local, hackmud-inspired terminal sim (single-player, offline).
+// This is a lightweight homage: scripts are code you can edit and call,
+// security levels gate cross-script calls, and locs are breached via lock stacks.
+
+const SAVE_KEY = "hackterm_save_v1";
+const SEC_LEVELS = ["NULLSEC", "LOWSEC", "MIDSEC", "HIGHSEC", "FULLSEC"];
+const UPGRADE_DEFS = {
+  "upg.trace_spool": {
+    name: "trace_spool",
+    apply: () => {
+      state.traceMax = Math.min(9, state.traceMax + 2);
+    },
+    describe: "Increases TRACE limit by +2.",
+  },
+  "upg.coolant": {
+    name: "coolant",
+    apply: () => {
+      state.trace = Math.max(0, state.trace - 2);
+    },
+    describe: "Reduces current TRACE by 2.",
+  },
+};
+
+function secRank(level) {
+  const idx = SEC_LEVELS.indexOf(level);
+  return idx === -1 ? 0 : idx;
+}
+
+const screen = document.getElementById("screen");
+const input = document.getElementById("cmd");
+const prompt = document.getElementById("prompt");
+const statusLine = document.getElementById("status-line");
+const gcSpan = document.getElementById("gc");
+const traceSpan = document.getElementById("trace");
+const hint = document.getElementById("hint");
+const chatLog = document.getElementById("chat-log");
+const chatInput = document.getElementById("chat-input");
+const chatChannelLabel = document.getElementById("chat-channel");
+const scratchPad = document.getElementById("scratch-pad");
+const scratchClear = document.getElementById("scratch-clear");
+const quickLinks = document.getElementById("quick-links");
+
+function writeLine(text, kind) {
+  const line = document.createElement("div");
+  line.className = `line${kind ? " " + kind : ""}`;
+  renderTerminalRich(line, String(text));
+  screen.appendChild(line);
+  screen.scrollTop = screen.scrollHeight;
+}
+
+function writeBlock(text, kind) {
+  if (!text) {
+    writeLine("", kind);
+    return;
+  }
+  String(text)
+    .split("\n")
+    .forEach((line) => writeLine(line, kind));
+}
+
+function renderChat() {
+  if (!chatLog) return;
+  chatLog.innerHTML = "";
+  if (chatChannelLabel) chatChannelLabel.textContent = state.chat.channel;
+  const messages = state.chat.log.filter(
+    (m) => !m.channel || m.channel === state.chat.channel
+  );
+  messages.forEach((m) => {
+    const row = document.createElement("div");
+    row.className = "chat-msg";
+
+    const time = document.createElement("span");
+    time.className = "chat-time";
+    time.textContent = chatTime(m.t);
+
+    const colorClass =
+      m.kind === "trust" ? "trust" : m.color || userColorClass(m.from);
+    const uidText = document.createElement("span");
+    uidText.className = "uid-text";
+    uidText.textContent = String(m.uid || (m.kind === "trust" ? "0000" : userId4(m.from)));
+
+    const body = document.createElement("span");
+    body.className = "chat-body";
+    const nameSpan = document.createElement("span");
+    nameSpan.className =
+      "chat-name " + (m.kind === "trust" ? "tok trust" : colorClass);
+    nameSpan.textContent = m.from;
+    body.appendChild(nameSpan);
+    body.appendChild(document.createTextNode(" :: "));
+    const msgSpan = document.createElement("span");
+    renderTerminalRich(msgSpan, String(m.body));
+    body.appendChild(msgSpan);
+
+    row.appendChild(time);
+    row.appendChild(uidText);
+    row.appendChild(body);
+    chatLog.appendChild(row);
+  });
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+const SCRATCH_KEY_PREFIX = "hackterm_scratch_v1:";
+let scratchSaveTimer = null;
+
+function scratchKey() {
+  const handle = state.handle ? String(state.handle) : "default";
+  return SCRATCH_KEY_PREFIX + handle.toLowerCase();
+}
+
+function loadScratchFromStorage() {
+  if (!scratchPad) return;
+  const raw = localStorage.getItem(scratchKey());
+  if (raw !== null) scratchPad.value = raw;
+}
+
+function saveScratchToStorage() {
+  if (!scratchPad) return;
+  localStorage.setItem(scratchKey(), scratchPad.value);
+}
+
+function scheduleScratchSave() {
+  if (!scratchPad) return;
+  if (scratchSaveTimer) window.clearTimeout(scratchSaveTimer);
+  scratchSaveTimer = window.setTimeout(() => {
+    scratchSaveTimer = null;
+    saveScratchToStorage();
+  }, 250);
+}
+
+function scratchAppend(text) {
+  if (!scratchPad) return;
+  const line = String(text ?? "").trimEnd();
+  if (!line) return;
+  const prefix = scratchPad.value && !scratchPad.value.endsWith("\n") ? "\n" : "";
+  scratchPad.value = scratchPad.value + prefix + line + "\n";
+  scheduleScratchSave();
+}
+
+function chatTime(epochMs) {
+  const date = new Date(epochMs || Date.now());
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  return `${hh}${mm}`;
+}
+
+function hashString32(input) {
+  // FNV-1a
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = (hash * 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+function userColorClass(name) {
+  const n = String(name || "user");
+  const idx = hashString32(n.toLowerCase()) % 12;
+  return "userc" + idx;
+}
+
+function userId4(name) {
+  const n = String(name || "user");
+  const val = hashString32("uid:" + n.toLowerCase()) & 0xffff;
+  return val.toString(16).toUpperCase().padStart(4, "0");
+}
+
+let knownNamesCacheKey = "";
+let knownNamesCacheRegex = null;
+
+function escapeRegex(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getKnownNamesRegex() {
+  const names = new Set();
+  if (state.handle) names.add(state.handle);
+  Object.keys(NPCS).forEach((n) => names.add(n));
+  state.chat.log.slice(-200).forEach((m) => {
+    if (m && m.from) names.add(String(m.from));
+  });
+
+  const list = Array.from(names)
+    .map((n) => String(n).trim())
+    .filter((n) => n.length && n.toLowerCase() !== "trust")
+    .sort((a, b) => b.length - a.length);
+
+  const key = list.join("|").toLowerCase();
+  if (key === knownNamesCacheKey) return knownNamesCacheRegex;
+  knownNamesCacheKey = key;
+
+  if (!list.length) {
+    knownNamesCacheRegex = null;
+    return null;
+  }
+
+  const alt = list.map(escapeRegex).join("|");
+  // Word-ish boundaries that include underscores.
+  knownNamesCacheRegex = new RegExp(`(?<![A-Za-z0-9_])(${alt})(?![A-Za-z0-9_])`, "gi");
+  return knownNamesCacheRegex;
+}
+
+function renderTerminalRich(container, text) {
+  // Light token highlighting to mimic hackmud coloring.
+  // Keep it safe: create spans, don't inject HTML.
+  const nameRegex = getKnownNamesRegex();
+  const patterns = [
+    { re: /\bscripts\.trust(?:\.[a-zA-Z0-9_.]+)?\b/g, cls: "tok trust" },
+    { re: /\b(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)\b/g, cls: "tok sec" },
+    { re: /\bkit\.[a-zA-Z0-9_]+\b/g, cls: "tok kit" },
+    { re: /(^|[\s])([#@][a-zA-Z0-9_-]+)/g, cls: "tok chan", group: 2 },
+    ...(nameRegex
+      ? [
+          {
+            re: nameRegex,
+            dynamic: (raw) => userColorClass(raw),
+          },
+        ]
+      : []),
+    // File-like tokens: base dim + extension lime (common hackmud vibe).
+    {
+      re: /\b([a-zA-Z0-9_-]+)\.(s|txt|log|b64|rot13|sig|dat|upg|key|arc)\b/g,
+      cls: "tok file",
+      file: true,
+    },
+  ];
+
+  const segments = [];
+  let cursor = 0;
+  const matches = [];
+  patterns.forEach((p) => {
+    let m;
+    while ((m = p.re.exec(text))) {
+      const idx = p.group ? m.index + m[0].indexOf(m[p.group]) : m.index;
+      const raw = p.group ? m[p.group] : m[0];
+      matches.push({
+        start: idx,
+        end: idx + raw.length,
+        cls: p.dynamic ? p.dynamic(raw) : p.cls,
+        raw,
+        file: Boolean(p.file),
+        fileBase: p.file ? m[1] : null,
+        fileExt: p.file ? m[2] : null,
+      });
+      if (m.index === p.re.lastIndex) p.re.lastIndex++;
+    }
+  });
+
+  // Prefer "stronger" semantic matches (trust/sec/channel) over file tokens.
+  const clsPriority = (cls, file) => {
+    if (cls.includes("trust")) return 5;
+    if (cls.includes("sec")) return 4;
+    if (cls.includes("chan")) return 3;
+    if (cls.includes("kit")) return 2;
+    if (file) return 1;
+    return 0;
+  };
+  matches.sort(
+    (a, b) =>
+      a.start - b.start ||
+      clsPriority(b.cls, b.file) - clsPriority(a.cls, a.file) ||
+      b.end - a.end
+  );
+
+  const nonOverlapping = [];
+  let lastEnd = -1;
+  for (const m of matches) {
+    if (m.start < lastEnd) continue;
+    nonOverlapping.push(m);
+    lastEnd = m.end;
+  }
+
+  container.textContent = "";
+  nonOverlapping.forEach((m) => {
+    if (cursor < m.start) segments.push({ kind: "text", raw: text.slice(cursor, m.start) });
+    if (m.file) {
+      segments.push({ kind: "tok", raw: m.fileBase, cls: "tok filebase" });
+      segments.push({ kind: "text", raw: "." });
+      segments.push({ kind: "tok", raw: m.fileExt, cls: "tok ext" });
+    } else {
+      segments.push({ kind: "tok", raw: text.slice(m.start, m.end), cls: m.cls });
+    }
+    cursor = m.end;
+  });
+  if (cursor < text.length) segments.push({ kind: "text", raw: text.slice(cursor) });
+
+  const frag = document.createDocumentFragment();
+  segments.forEach((s) => {
+    if (s.kind === "text") {
+      frag.appendChild(document.createTextNode(s.raw));
+      return;
+    }
+    const span = document.createElement("span");
+    span.className = s.cls;
+    span.textContent = s.raw;
+    frag.appendChild(span);
+  });
+  container.appendChild(frag);
+}
+
+function chatPost({ channel, from, body, kind }) {
+  const resolvedFrom = from || state.handle || "ghost";
+  const resolvedKind = kind || "user";
+  state.chat.log.push({
+    t: Date.now(),
+    channel: channel || state.chat.channel,
+    from: resolvedFrom,
+    body: String(body || ""),
+    kind: resolvedKind,
+    color: resolvedKind === "trust" ? null : userColorClass(resolvedFrom),
+    uid: resolvedKind === "trust" ? "0000" : userId4(resolvedFrom),
+  });
+  renderChat();
+}
+
+function chatSystem(body) {
+  chatPost({ from: "trust", body, kind: "trust" });
+}
+
+function chatJoin(channel) {
+  if (!channel.startsWith("#") && !channel.startsWith("@")) channel = "#" + channel;
+  state.chat.channels.add(channel);
+  state.chat.channel = channel;
+  chatSystem("joined " + channel);
+}
+
+function chatSwitch(channel) {
+  if (!channel.startsWith("#") && !channel.startsWith("@")) channel = "#" + channel;
+  if (!state.chat.channels.has(channel)) {
+    chatSystem("unknown channel (join it first): " + channel);
+    return;
+  }
+  state.chat.channel = channel;
+  renderChat();
+}
+
+function chatHelp() {
+  chatSystem("chat commands: /help, /join #chan, /switch #chan, /channels");
+}
+
+const NPCS = {
+  switchboard: {
+    id: "switchboard",
+    display: "switchboard",
+    intro:
+      "I route you. I don’t save you. Type `tutorial` if you’re lost, or `help` for examples.",
+  },
+  juniper: {
+    id: "juniper",
+    display: "juniper",
+    intro:
+      "Welcome to my exchange. I sell junk, not morals. Ask for `work` if you want a contract.",
+  },
+  archivist: {
+    id: "archivist",
+    display: "archivist",
+    intro:
+      "The Sable Archive isn’t a place. It’s a habit. Bring me a sigil and I’ll bring you a door.",
+  },
+  weaver: {
+    id: "weaver",
+    display: "weaver",
+    intro:
+      "We stitch meaning onto noise. Tokens, marks, masks. Don’t confuse them.",
+  },
+};
+
+function npcKnown(id) {
+  return state.npcs.known.has(id);
+}
+
+function npcIntroduce(id) {
+  const npc = NPCS[id];
+  if (!npc) return;
+  if (!npcKnown(id)) state.npcs.known.add(id);
+  chatPost({ channel: "#kernel", from: npc.display, body: npc.intro });
+}
+
+function dmChannel(npcId) {
+  return "@" + npcId;
+}
+
+function ensureDm(npcId) {
+  const chan = dmChannel(npcId);
+  state.chat.channels.add(chan);
+  state.chat.channel = chan;
+  renderChat();
+  if (!npcKnown(npcId)) npcIntroduce(npcId);
+}
+
+function npcReply(npcId, body) {
+  const msg = String(body || "").toLowerCase();
+
+  if (npcId === "juniper") {
+    if (msg.includes("work")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "juniper",
+        body:
+          "Contract: pull `mask.dat` (use `download spoof.s` then `call kit.spoof`). Bring it back here and say `turnin mask`.",
+      });
+      state.flags.add("q_juniper_mask");
+      return;
+    }
+    if (msg.includes("turnin") && msg.includes("mask")) {
+      if (!state.inventory.has("mask.dat")) {
+        chatPost({
+          channel: dmChannel(npcId),
+          from: "juniper",
+          body: "You don’t have the mask. Don’t waste my time.",
+        });
+        return;
+      }
+      if (state.flags.has("q_juniper_mask_done")) {
+        chatPost({
+          channel: dmChannel(npcId),
+          from: "juniper",
+          body: "Already paid.",
+        });
+        return;
+      }
+      state.flags.add("q_juniper_mask_done");
+      state.gc += 50;
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "juniper",
+        body: "Clean enough. +50GC. Tip: breach `archives.arc` once you’ve got the ember phrase.",
+      });
+      updateHud();
+      return;
+    }
+    chatPost({
+      channel: dmChannel(npcId),
+      from: "juniper",
+      body: "Say `work` for a contract, or ask about `locks`, `scripts`, or `trace`.",
+    });
+    return;
+  }
+
+  if (npcId === "archivist") {
+    if (msg.includes("sigil") || msg.includes("lattice")) {
+      if (!state.flags.has("lattice_sigil")) {
+        chatPost({
+          channel: dmChannel(npcId),
+          from: "archivist",
+          body: "Bring me the words, not the vibe. Decode `key.b64` in the archive.",
+        });
+        return;
+      }
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "archivist",
+        body: "Good. Now find the cache. The lattice reads tokens and marks.",
+      });
+      return;
+    }
+    chatPost({
+      channel: dmChannel(npcId),
+      from: "archivist",
+      body: "Ask about `sigil` or `the drift`.",
+    });
+    return;
+  }
+
+  if (npcId === "weaver") {
+    if (msg.includes("token") || msg.includes("splice")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "weaver",
+        body:
+          "Token recipe: badge.sig + mask.dat + weaver.mark. Run `call kit.splice` after you download it.",
+      });
+      return;
+    }
+    chatPost({
+      channel: dmChannel(npcId),
+      from: "weaver",
+      body: "Ask about `token`, `ghost`, or `marks`.",
+    });
+    return;
+  }
+
+  chatPost({ channel: dmChannel(npcId), from: npcId, body: "…" });
+}
+
+function tellNpc(npcId, message) {
+  const id = String(npcId || "").toLowerCase().trim();
+  if (!id) {
+    writeLine("Usage: tell <npc> <message>", "warn");
+    return;
+  }
+  if (!NPCS[id]) {
+    writeLine("Unknown NPC. Try `contacts`.", "warn");
+    return;
+  }
+  ensureDm(id);
+  const text = String(message || "").trim();
+  if (!text) {
+    chatPost({ channel: dmChannel(id), from: state.handle || "ghost", body: "(ping)" });
+  } else {
+    chatPost({ channel: dmChannel(id), from: state.handle || "ghost", body: text });
+  }
+  state.flags.add("told_anyone");
+  tutorialAdvance();
+  npcReply(id, text);
+}
+
+function listContacts() {
+  writeLine("CONTACTS", "header");
+  Array.from(state.npcs.known)
+    .sort()
+    .forEach((id) => {
+      const npc = NPCS[id];
+      writeLine(`- ${id}${npc ? " (" + npc.display + ")" : ""}`, "dim");
+    });
+  writeLine("Tip: `tell juniper hi`", "dim");
+}
+
+function splitArgs(inputText) {
+  const text = String(inputText || "");
+  const parts = [];
+  let current = "";
+  let quote = null; // "'" | '"'
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+
+    if (/\s/.test(ch)) {
+      if (current.length) {
+        parts.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += ch;
+  }
+
+  if (current.length) parts.push(current);
+  return parts;
+}
+
+function parseScriptArgs(tokens) {
+  const args = { _: [] };
+  tokens.forEach((token) => {
+    if (token.includes("=")) {
+      const [key, value] = token.split("=", 2);
+      args[key] = value;
+    } else {
+      args._.push(token);
+    }
+  });
+  return args;
+}
+
+const state = {
+  handle: null,
+  loc: "home.hub",
+  gc: 420,
+  discovered: new Set(["home.hub", "public.exchange", "sable.gate"]),
+  unlocked: new Set(["home.hub", "public.exchange"]),
+  inventory: new Set(),
+  kit: {},
+  userScripts: {},
+  flags: new Set(),
+  marks: new Set(),
+  upgrades: new Set(),
+  trace: 0,
+  traceMax: 4,
+  lastCipher: null,
+  breach: null,
+  editor: null,
+  history: [],
+  historyIndex: 0,
+  chat: {
+    channel: "#kernel",
+    channels: new Set(["#kernel"]),
+    log: [{ t: Date.now(), from: "trust", body: "chats online", kind: "trust" }],
+  },
+  confirm: null,
+  tutorial: {
+    enabled: true,
+    stepIndex: 0,
+    completed: new Set(),
+  },
+  npcs: {
+    known: new Set(["switchboard"]),
+  },
+  downloads: {
+    active: null,
+    queue: [],
+  },
+};
+
+const MARKS = [
+  { id: "mark.scan", text: "Run scripts.trust.scan" },
+  { id: "mark.download", text: "Download a script from a loc" },
+  { id: "mark.edit", text: "Create a script with edit" },
+  { id: "mark.breach", text: "Breach a lock stack" },
+];
+
+const LOCS = {
+  "home.hub": {
+    title: "HUB/HOME",
+    desc: [
+      "A sterile hub and a dead net outside the glass.",
+      "The prompt waits. The drift is quiet tonight.",
+    ],
+    requirements: {},
+    locks: [],
+    links: ["public.exchange", "sable.gate"],
+    files: {
+      "readme.txt": {
+        type: "text",
+        content: [
+          "HACKTERM//BOOTSTRAP",
+          "This shell simulates a dead net for training and salvage.",
+          "",
+          "Core commands:",
+          "  scripts                  list scripts",
+          "  call <script> [args]     run a script",
+          "  edit <name>              create or overwrite a script",
+          "  connect <loc>            jump to a loc",
+          "  breach <loc>             start lock sequence",
+          "  unlock <answer>          submit an answer to the active lock",
+          "  ls / cat / download      file operations",
+          "  decode rot13|b64         decode the last cipher file",
+          "  inventory                list items and kit",
+          "  save / load              save or load",
+        ].join("\n"),
+      },
+      "message.txt": {
+        type: "text",
+        content: [
+          "FROM: SWITCHBOARD",
+          "SUBJ: ember signal",
+          "",
+          "We caught a pulse in the Drift. It points at the Sable Archive.",
+          "Follow the ember. Bring back what you can. Decide if it should",
+          "leave the net or stay buried.",
+          "",
+          "Start by running scripts.trust.scan, then pull a kit script.",
+        ].join("\n"),
+      },
+    },
+  },
+  "public.exchange": {
+    title: "SCRAP EXCHANGE",
+    desc: [
+      "A low signal bazaar built from scavenged hardware.",
+      "Deals are cheap. Trust is not.",
+    ],
+    requirements: {},
+    locks: [],
+    links: ["home.hub", "sable.gate", "weaver.den"],
+    files: {
+      "stall.log": {
+        type: "text",
+        content: [
+          "SCRAP EXCHANGE LOG",
+          "Juniper keeps old routines in plain sight.",
+          "Run tracer.s to map the edge. Spoof a mask with spoof.s.",
+          "Sniffer pulses find hidden dens. Use sniffer.s.",
+        ].join("\n"),
+      },
+      "badge.sig": {
+        type: "item",
+        item: "badge.sig",
+        content: [
+          "BADGE.SIG",
+          "Issuer: Lotus-Kline perimeter",
+          "Signature: 9f3a-77b1",
+        ].join("\n"),
+      },
+      "tracer.s": {
+        type: "script",
+        script: {
+          name: "tracer",
+          sec: "FULLSEC",
+          code: [
+            "// @sec FULLSEC",
+            "ctx.print('Tracer online. Mesh resolving...');",
+            "ctx.flag('trace_open');",
+            "ctx.discover(['archives.arc']);",
+          ].join("\n"),
+        },
+        content: [
+          "/* tracer.s */",
+          "function main(ctx,args){",
+          "  // Map the perimeter mesh and expose reachable locs.",
+          "}",
+        ].join("\n"),
+      },
+      "spoof.s": {
+        type: "script",
+        script: {
+          name: "spoof",
+          sec: "FULLSEC",
+          code: [
+            "// @sec FULLSEC",
+            "if (ctx.hasItem('mask.dat')) { ctx.print('Mask already minted.'); return; }",
+            "ctx.addItem('mask.dat');",
+            "ctx.print('Mask minted: mask.dat');",
+          ].join("\n"),
+        },
+        content: [
+          "/* spoof.s */",
+          "function main(ctx,args){",
+          "  // Spoof a temporary mask signature.",
+          "}",
+        ].join("\n"),
+      },
+      "sniffer.s": {
+        type: "script",
+        script: {
+          name: "sniffer",
+          sec: "HIGHSEC",
+          code: [
+            "// @sec HIGHSEC",
+            "if (ctx.flagged('sniffer_run')) { ctx.print('Sniffer already swept the quiet bands.'); return; }",
+            "ctx.flag('sniffer_run');",
+            "ctx.discover(['weaver.den','corp.audit','lattice.cache','monument.beacon']);",
+            "ctx.print('Sniffer pulse complete.');",
+          ].join("\n"),
+        },
+        content: [
+          "/* sniffer.s */",
+          "function main(ctx,args){",
+          "  // Sweep the quiet bands for hidden signals.",
+          "}",
+        ].join("\n"),
+      },
+    },
+  },
+  "sable.gate": {
+    title: "PERIMETER.GATE",
+    desc: [
+      "The Lotus-Kline perimeter still hums with old security.",
+      "A quiet node, a long memory.",
+    ],
+    requirements: {},
+    locks: [
+      {
+        prompt: "LOCK: badge.sig required",
+        answer: "badge.sig",
+        hint: "Pull badge.sig from the exchange.",
+      },
+      {
+        prompt: "LOCK: respond with the ember phrase",
+        answer: "EMBER IS THE DRIFT",
+        hint: "cipher.txt hints at rot13.",
+      },
+    ],
+    links: ["home.hub", "public.exchange", "archives.arc"],
+    files: {
+      "access.log": {
+        type: "text",
+        content: [
+          "PERIMETER ACCESS LOG",
+          "Gate rejects unmasked access. Badge required.",
+          "Attached note looks like rot13. See cipher.txt.",
+        ].join("\n"),
+      },
+      "cipher.txt": {
+        type: "text",
+        cipher: true,
+        content: "rzore vf gur qevsg",
+      },
+    },
+  },
+  "archives.arc": {
+    title: "SABLE ARCHIVE",
+    desc: [
+      "Cold stacks of memory and a faint relay tone.",
+      "The archive is here, waiting.",
+    ],
+    requirements: { items: ["mask.dat"], flags: ["trace_open"] },
+    locks: [
+      {
+        prompt: "LOCK: mask.dat required",
+        answer: "mask.dat",
+        hint: "Use spoof.s at the exchange to mint the mask.",
+      },
+    ],
+    links: ["sable.gate", "lattice.cache"],
+    files: {
+      "lore.log": {
+        type: "text",
+        content: [
+          "SABLE ARCHIVE INDEX",
+          "The archive remembers the first operators and the patch that",
+          "turned the net to drift. A relay called the Relic is folded",
+          "inside. The old manifest warns: sigil stored in base64.",
+          "",
+          "Pull fork.s to split the relay channel.",
+        ].join("\n"),
+      },
+      "key.b64": { type: "text", cipher: true, content: "U0lHSUw6IExBVFRJQ0U=" },
+      "fork.s": {
+        type: "script",
+        script: {
+          name: "fork",
+          sec: "MIDSEC",
+          code: [
+            "// @sec MIDSEC",
+            "if (ctx.flagged('forked')) { ctx.print('Relay already forked.'); return; }",
+            "ctx.flag('forked');",
+            "ctx.discover(['core.relic']);",
+            "ctx.print('Relay forked. Core channel exposed.');",
+          ].join("\n"),
+        },
+        content: [
+          "/* fork.s */",
+          "function main(ctx,args){",
+          "  // Split a relay channel to expose the core.",
+          "}",
+        ].join("\n"),
+      },
+    },
+  },
+  "weaver.den": {
+    title: "WEAVER.DEN",
+    desc: [
+      "A low-lit workshop of stitched code and soft voices.",
+      "The Weavers trade in patterns and provenance.",
+    ],
+    requirements: { flags: ["sniffer_run"] },
+    locks: [
+      {
+        prompt: "LOCK: supply a weave phrase",
+        answer: "THREAD THE DRIFT",
+        hint: "Search weaver.log for the phrase.",
+      },
+    ],
+    links: ["public.exchange", "corp.audit", "lattice.cache"],
+    files: {
+      "weaver.log": {
+        type: "text",
+        content: [
+          "WEAVER.DEN LOG",
+          "Bring proof of thread. The lattice cache honors a token spliced",
+          "from badge.sig + mask.dat + weaver.mark. Use splice.s.",
+          "Ghost your trail with ghost.s to reach the corporate audit node.",
+          "",
+          "Weave phrase: THREAD THE DRIFT",
+        ].join("\n"),
+      },
+      "weaver.mark": {
+        type: "item",
+        item: "weaver.mark",
+        content: ["WEAVER.MARK", "A stitched glyph accepted by those who know."].join(
+          "\n"
+        ),
+      },
+      "splice.s": {
+        type: "script",
+        script: {
+          name: "splice",
+          sec: "MIDSEC",
+          code: [
+            "// @sec MIDSEC",
+            "const need = ['badge.sig','mask.dat','weaver.mark'].filter(i => !ctx.hasItem(i));",
+            "if (need.length) { ctx.print('Splice failed. Missing: ' + need.join(', ')); return; }",
+            "if (ctx.hasItem('token.key')) { ctx.print('Token already forged.'); return; }",
+            "ctx.addItem('token.key');",
+            "ctx.print('Token forged: token.key');",
+          ].join("\n"),
+        },
+        content: ["/* splice.s */", "function main(ctx,args){", "  // ...", "}"].join(
+          "\n"
+        ),
+      },
+      "ghost.s": {
+        type: "script",
+        script: {
+          name: "ghost",
+          sec: "LOWSEC",
+          code: [
+            "// @sec LOWSEC",
+            "if (ctx.flagged('ghosted')) { ctx.print('Ghost protocol already active.'); return; }",
+            "if (!ctx.hasItem('weaver.mark')) { ctx.print('Ghost protocol requires weaver.mark.'); return; }",
+            "ctx.flag('ghosted');",
+            "ctx.discover(['corp.audit']);",
+            "ctx.print('Ghost protocol active. Trail is cold.');",
+          ].join("\n"),
+        },
+        content: ["/* ghost.s */", "function main(ctx,args){", "  // ...", "}"].join(
+          "\n"
+        ),
+      },
+    },
+  },
+  "corp.audit": {
+    title: "CORP.AUDIT",
+    desc: ["An audit chamber lit by cold LEDs.", "Anything unmasked gets burned."],
+    requirements: { flags: ["ghosted"] },
+    locks: [
+      {
+        prompt: "LOCK: supply the shard sequence (3-1-4)",
+        answer: "3-1-4",
+        hint: "Audit log lists the shard order.",
+      },
+    ],
+    links: ["weaver.den"],
+    files: {
+      "audit.log": {
+        type: "text",
+        content: ["CORP AUDIT SUMMARY", "Sequence: 3-1-4"].join("\n"),
+      },
+      "relay.shard": {
+        type: "item",
+        item: "relay.shard",
+        content: ["RELAY.SHARD", "Segment: LK-ACCT/relay", "Status: cold"].join("\n"),
+      },
+    },
+  },
+  "lattice.cache": {
+    title: "LATTICE.CACHE",
+    desc: [
+      "A vault of interlocked lattice.",
+      "The air tastes like static and old promises.",
+    ],
+    requirements: { items: ["token.key", "weaver.mark"], flags: ["lattice_sigil"] },
+    locks: [
+      {
+        prompt: "LOCK: confirm lattice sigil",
+        answer: "SIGIL: LATTICE",
+        hint: "Decode key.b64 in the archive.",
+      },
+    ],
+    links: ["archives.arc", "core.relic"],
+    files: {
+      "cache.log": {
+        type: "text",
+        content: [
+          "LATTICE CACHE",
+          "The lattice accepts the token and the weaver mark.",
+          "The relic key rests inside.",
+        ].join("\n"),
+      },
+      "relic.key": {
+        type: "item",
+        item: "relic.key",
+        content: ["RELIC.KEY", "Access key for CORE RELIC."].join("\n"),
+      },
+    },
+  },
+  "core.relic": {
+    title: "CORE RELIC",
+    desc: [
+      "A buried relay and a voice in the static.",
+      "You can feel the drift pull at the edges.",
+    ],
+    requirements: { items: ["relay.shard", "relic.key"], flags: ["forked"] },
+    locks: [],
+    links: ["lattice.cache"],
+    files: {
+      "core.log": {
+        type: "text",
+        content: [
+          "CORE RELIC",
+          "The relic wakes. It asks for a choice.",
+          "",
+          "Type: exfiltrate  - lift it out into a private shell",
+          "Type: restore     - bind it back to the Drift",
+        ].join("\n"),
+      },
+    },
+  },
+  "monument.beacon": {
+    title: "MONUMENT.BEACON",
+    desc: [
+      "A public monument, half propaganda and half prayer.",
+      "Somebody left a beacon lit in the drift like it wanted to be found.",
+    ],
+    requirements: { flags: ["sniffer_run"] },
+    locks: [
+      {
+        prompt: "LOCK: submit the beacon phrase",
+        answer: "IN RISK WE TRUST",
+        hint: "Read plaque.txt and listen to the chat.",
+      },
+    ],
+    links: ["public.exchange"],
+    files: {
+      "plaque.txt": {
+        type: "text",
+        content: [
+          "PLAQUE",
+          "A corporate motto carved into cheap alloy.",
+          "Letters rubbed smooth: IN RISK WE TRUST",
+        ].join("\n"),
+      },
+      "beacon.b64": {
+        type: "text",
+        cipher: true,
+        content: "QkVBQ09OOiBTTElQRVIgSU4gVEhFIERSSUZU",
+      },
+      "coolant.upg": {
+        type: "upgrade",
+        item: "upg.coolant",
+        content: [
+          "UPGRADE: COOLANT",
+          "A black-market coolant line. It can pull heat out of your trace.",
+        ].join("\n"),
+      },
+    },
+  },
+  "echo.after": {
+    title: "ECHO.AFTER",
+    desc: [
+      "A quiet channel that only exists after you touch the relic.",
+      "Echoes loop here. Some are yours.",
+    ],
+    requirements: { flags: ["touched_relic"] },
+    locks: [],
+    links: ["home.hub"],
+    files: {
+      "echo.log": {
+        type: "text",
+        content: [
+          "ECHO LOG",
+          "If you carried the relic, you carry the consequences.",
+          "If you restored it, you still altered the drift.",
+        ].join("\n"),
+      },
+      "spool.upg": {
+        type: "upgrade",
+        item: "upg.trace_spool",
+        content: ["UPGRADE: TRACE_SPOOL", "Coils that widen your trace budget."].join(
+          "\n"
+        ),
+      },
+    },
+  },
+};
+
+function getLoc(name) {
+  return LOCS[name] || null;
+}
+
+function discover(locs) {
+  const newly = [];
+  locs.forEach((loc) => {
+    if (!state.discovered.has(loc)) {
+      state.discovered.add(loc);
+      newly.push(loc);
+    }
+  });
+  return newly;
+}
+
+function setMark(id) {
+  state.marks.add(id);
+}
+
+function listMarks() {
+  writeLine("MARKS", "header");
+  MARKS.forEach((mark) => {
+    const done = state.marks.has(mark.id) ? "[X]" : "[ ]";
+    writeLine(`${done} ${mark.text}`, "dim");
+  });
+}
+
+function listLocs() {
+  writeLine("LOCATIONS", "header");
+  Array.from(state.discovered)
+    .sort()
+    .forEach((locName) => {
+      const node = getLoc(locName);
+      const unlocked = state.unlocked.has(locName) ? "OPEN" : "LOCKED";
+      const title = node ? node.title : "UNKNOWN";
+      writeLine(`${locName} [${unlocked}] :: ${title}`, "dim");
+    });
+}
+
+function showLoc() {
+  const loc = getLoc(state.loc);
+  if (!loc) {
+    writeLine("Unknown location.", "error");
+    return;
+  }
+  writeLine(`:: ${state.loc} :: ${loc.title}`, "header");
+  writeBlock(loc.desc.join("\n"), "dim");
+}
+
+function listFiles() {
+  const loc = getLoc(state.loc);
+  const names = Object.keys(loc.files || {});
+  if (!names.length) {
+    writeLine("No files.", "dim");
+    return;
+  }
+  names.forEach((name) => {
+    const entry = loc.files[name];
+    writeLine(`${name} (${entry.type})`, "dim");
+  });
+}
+
+function globToRegex(glob) {
+  // Simple glob: * and ? only.
+  const escaped = String(glob)
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  return new RegExp("^" + escaped + "$", "i");
+}
+
+function isDownloadableEntry(entry) {
+  return entry && (entry.type === "item" || entry.type === "script" || entry.type === "upgrade");
+}
+
+function entrySize(entry) {
+  if (!entry) return 0;
+  const content = String(entry.content || "");
+  if (entry.type === "script") {
+    const code = String((entry.script && entry.script.code) || "");
+    return content.length + code.length;
+  }
+  return content.length;
+}
+
+function scheduleDownload(locName, fileName) {
+  const loc = getLoc(locName);
+  const entry = loc && loc.files && loc.files[fileName];
+  if (!entry || !isDownloadableEntry(entry)) return false;
+
+  // Skip duplicates already acquired.
+  if (entry.type === "item" && state.inventory.has(entry.item)) return false;
+  if (entry.type === "upgrade" && state.inventory.has(entry.item)) return false;
+  if (entry.type === "script" && state.kit[entry.script.name]) return false;
+
+  const alreadyQueued =
+    (state.downloads.active &&
+      state.downloads.active.loc === locName &&
+      state.downloads.active.file === fileName) ||
+    state.downloads.queue.some((q) => q.loc === locName && q.file === fileName);
+  if (alreadyQueued) return false;
+
+  state.downloads.queue.push({ loc: locName, file: fileName });
+  return true;
+}
+
+function startNextDownloadIfIdle() {
+  if (state.downloads.active) return;
+  const next = state.downloads.queue.shift();
+  if (!next) {
+    updateHud();
+    return;
+  }
+
+  const loc = getLoc(next.loc);
+  const entry = loc.files[next.file];
+  const size = entrySize(entry);
+  const base = 220;
+  const scaled = Math.floor(size / 22);
+  const jitter = Math.floor(Math.random() * 140);
+  const durationMs = Math.max(260, Math.min(2200, base + scaled + jitter));
+
+  state.downloads.active = {
+    loc: next.loc,
+    file: next.file,
+    durationMs,
+    startedAt: Date.now(),
+    timer: null,
+    tick: null,
+  };
+  writeLine(`downloading ${next.file}...`, "dim");
+
+  state.downloads.active.tick = window.setInterval(() => updateHud(), 120);
+  state.downloads.active.timer = window.setTimeout(() => {
+    completeActiveDownload();
+  }, durationMs);
+  updateHud();
+}
+
+function completeActiveDownload() {
+  if (!state.downloads.active) return;
+  const active = state.downloads.active;
+  const loc = getLoc(active.loc);
+  const entry = loc && loc.files && loc.files[active.file];
+
+  if (active.tick) window.clearInterval(active.tick);
+  if (active.timer) window.clearTimeout(active.timer);
+  state.downloads.active = null;
+
+  if (!entry || !isDownloadableEntry(entry)) {
+    writeLine(`download failed: ${active.file}`, "error");
+    startNextDownloadIfIdle();
+    return;
+  }
+
+  // Apply acquisition
+  if (entry.type === "item") {
+    state.inventory.add(entry.item);
+    writeLine(`download complete: ${active.file} -> ${entry.item}`, "ok");
+  } else if (entry.type === "upgrade") {
+    state.inventory.add(entry.item);
+    writeLine(`download complete: ${active.file} -> ${entry.item}`, "ok");
+    writeLine("Tip: install " + entry.item, "dim");
+  } else if (entry.type === "script") {
+    state.kit[entry.script.name] = {
+      owner: "kit",
+      name: entry.script.name,
+      sec: entry.script.sec,
+      code: entry.script.code,
+    };
+    writeLine(`download complete: ${active.file} -> kit.${entry.script.name}`, "ok");
+    state.marks.add("mark.download");
+  }
+
+  // Keep tutorial/story reactive.
+  storyChatTick();
+  tutorialAdvance();
+  updateHud();
+  startNextDownloadIfIdle();
+}
+
+function downloadCommand(pattern) {
+  const target = String(pattern || "").trim();
+  if (!target) {
+    writeLine("Usage: download <file> | download *.s", "warn");
+    return;
+  }
+  const loc = getLoc(state.loc);
+  const files = Object.keys((loc && loc.files) || {});
+  const isGlob = target.includes("*") || target.includes("?");
+
+  const matches = isGlob
+    ? files.filter((f) => globToRegex(target).test(f))
+    : [target];
+
+  if (!matches.length) {
+    writeLine("No matches.", "warn");
+    return;
+  }
+
+  let queued = 0;
+  let skipped = 0;
+  for (const name of matches) {
+    const entry = loc.files[name];
+    if (!entry) {
+      skipped += 1;
+      continue;
+    }
+    if (!isDownloadableEntry(entry)) {
+      skipped += 1;
+      continue;
+    }
+    const ok = scheduleDownload(state.loc, name);
+    if (ok) queued += 1;
+    else skipped += 1;
+  }
+
+  if (!queued) {
+    writeLine("Nothing new to download.", "dim");
+    return;
+  }
+  writeLine(`queued ${queued} download(s)${skipped ? ` (${skipped} skipped)` : ""}`, "dim");
+  startNextDownloadIfIdle();
+}
+
+function downloadsStatus() {
+  writeLine("DOWNLOADS", "header");
+  if (state.downloads.active) {
+    writeLine(`active: ${state.downloads.active.file}`, "dim");
+  } else {
+    writeLine("active: (none)", "dim");
+  }
+  if (state.downloads.queue.length) {
+    writeLine("queue:", "dim");
+    state.downloads.queue.slice(0, 12).forEach((q) => writeLine(`- ${q.file}`, "dim"));
+    if (state.downloads.queue.length > 12) writeLine("...", "dim");
+  } else {
+    writeLine("queue: (empty)", "dim");
+  }
+}
+
+function readFile(name) {
+  const loc = getLoc(state.loc);
+  const entry = loc.files[name];
+  if (!entry) {
+    writeLine("File not found.", "error");
+    return;
+  }
+  writeBlock(entry.content, "dim");
+  if (entry.cipher) {
+    state.lastCipher = entry.content;
+  }
+}
+
+function downloadFile(name) {
+  const loc = getLoc(state.loc);
+  const entry = loc.files[name];
+  if (!entry) {
+    writeLine("File not found.", "error");
+    return;
+  }
+  if (!isDownloadableEntry(entry)) {
+    writeLine("Nothing to download.", "warn");
+    return;
+  }
+  const ok = scheduleDownload(state.loc, name);
+  if (!ok) {
+    writeLine("Already acquired or queued.", "dim");
+    return;
+  }
+  writeLine("queued 1 download", "dim");
+  startNextDownloadIfIdle();
+}
+
+function installUpgrade(itemId) {
+  const key = String(itemId || "").trim();
+  if (!key) {
+    writeLine("Usage: install <upgrade>", "warn");
+    return;
+  }
+  if (!state.inventory.has(key)) {
+    writeLine("Upgrade not in inventory.", "warn");
+    return;
+  }
+  const def = UPGRADE_DEFS[key];
+  if (!def) {
+    writeLine("Unknown upgrade.", "warn");
+    return;
+  }
+  if (state.upgrades.has(key)) {
+    writeLine("Upgrade already installed.", "dim");
+    return;
+  }
+  def.apply();
+  state.upgrades.add(key);
+  writeLine(`Installed ${key}`, "ok");
+  writeLine(def.describe, "dim");
+  updateHud();
+}
+
+function waitTick() {
+  if (state.trace > 0) state.trace -= 1;
+  writeLine("...waiting...", "dim");
+  if (state.trace === 0) writeLine("trace is cold", "ok");
+  storyChatTick();
+}
+
+function hookUi() {
+  if (scratchClear && scratchPad) {
+    scratchClear.addEventListener("click", () => {
+      scratchPad.value = "";
+      saveScratchToStorage();
+      chatSystem("scratch cleared");
+    });
+  }
+  if (scratchPad) {
+    scratchPad.addEventListener("input", () => scheduleScratchSave());
+  }
+  if (quickLinks) {
+    quickLinks.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const btn = target.closest("button[data-call]");
+      if (!btn) return;
+      const call = btn.getAttribute("data-call");
+      if (!call) return;
+      writeLine(`${prompt.textContent} call ${call}`, "dim");
+      runScript(call, { _: [] });
+      tutorialAdvance();
+      updateHud();
+    });
+  }
+}
+
+function resetToFreshState(keepChat) {
+  const priorChat = keepChat ? state.chat : null;
+  state.handle = null;
+  state.loc = "home.hub";
+  state.gc = 420;
+  state.discovered = new Set(["home.hub", "public.exchange", "sable.gate"]);
+  state.unlocked = new Set(["home.hub", "public.exchange"]);
+  state.inventory = new Set();
+  state.kit = {};
+  state.userScripts = {};
+  state.flags = new Set();
+  state.marks = new Set();
+  state.upgrades = new Set();
+  state.trace = 0;
+  state.traceMax = 4;
+  state.lastCipher = null;
+  state.breach = null;
+  state.editor = null;
+  state.history = [];
+  state.historyIndex = 0;
+  state.confirm = null;
+  state.tutorial = { enabled: true, stepIndex: 0, completed: new Set() };
+  state.npcs = { known: new Set(["switchboard"]) };
+  state.downloads = { active: null, queue: [] };
+  state.chat = priorChat || {
+    channel: "#kernel",
+    channels: new Set(["#kernel"]),
+    log: [{ t: Date.now(), from: "trust", body: "chats online", kind: "trust" }],
+  };
+  renderChat();
+  if (scratchPad) scratchPad.value = "";
+  updateHud();
+}
+
+const TUTORIAL_STEPS = [
+  {
+    id: "t_handle",
+    title: "Set Your Handle",
+    hint: "Type any handle and press Enter.",
+    check: () => Boolean(state.handle),
+    onStart: () =>
+      chatPost({ channel: "#kernel", from: "switchboard", body: "Pick a handle." }),
+  },
+  {
+    id: "t_scan",
+    title: "Scan For Signals",
+    hint: "Run `scan`.",
+    check: () => state.marks.has("mark.scan"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "First rule: never walk blind. Run `scan`.",
+      }),
+  },
+  {
+    id: "t_exchange",
+    title: "Reach The Exchange",
+    hint: "Run `connect public.exchange`.",
+    check: () => state.loc === "public.exchange",
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Patch into the exchange: `connect public.exchange`.",
+      }),
+  },
+  {
+    id: "t_download",
+    title: "Download A Script",
+    hint: "Run `download tracer.s`.",
+    check: () => Boolean(state.kit.tracer),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "juniper",
+        body: "Grab tracer.s. If you break it, you bought it.",
+      }),
+  },
+  {
+    id: "t_run",
+    title: "Run A Script",
+    hint: "Run `call kit.tracer`.",
+    check: () => state.flags.has("trace_open"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Run it: `call kit.tracer`.",
+      }),
+  },
+  {
+    id: "t_badge",
+    title: "Acquire Credentials",
+    hint: "Run `download badge.sig`.",
+    check: () => state.inventory.has("badge.sig"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "juniper",
+        body: "Badge is hot. Keep it anyway. `download badge.sig`.",
+      }),
+  },
+  {
+    id: "t_gate",
+    title: "Breach The Gate",
+    hint: "Run `breach sable.gate`, then `unlock badge.sig`.",
+    check: () => state.unlocked.has("sable.gate"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Gate time. `breach sable.gate`.",
+      }),
+  },
+  {
+    id: "t_decode",
+    title: "Decode The Ember Phrase",
+    hint: "Run `cat cipher.txt`, then `decode rot13`.",
+    check: () => state.flags.has("ember_phrase"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Read the note. Decode it. Then we go deeper.",
+      }),
+  },
+  {
+    id: "t_social",
+    title: "Talk To Someone",
+    hint: "Try `tell juniper hi` (local NPC DMs).",
+    check: () => state.flags.has("told_anyone"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "You’re solo out here. NPCs are your network. Try `tell juniper hi`.",
+      }),
+  },
+];
+
+function tutorialCurrent() {
+  if (!state.tutorial.enabled) return null;
+  const idx = Math.max(
+    0,
+    Math.min(TUTORIAL_STEPS.length - 1, state.tutorial.stepIndex)
+  );
+  return TUTORIAL_STEPS[idx] || null;
+}
+
+function tutorialAdvance() {
+  if (!state.tutorial.enabled) return;
+
+  while (state.tutorial.stepIndex < TUTORIAL_STEPS.length) {
+    const step = TUTORIAL_STEPS[state.tutorial.stepIndex];
+    if (!step) break;
+    if (state.tutorial.completed.has(step.id)) {
+      state.tutorial.stepIndex += 1;
+      continue;
+    }
+    if (step.check()) {
+      state.tutorial.completed.add(step.id);
+      state.tutorial.stepIndex += 1;
+      continue;
+    }
+    break;
+  }
+
+  const current = tutorialCurrent();
+  if (!current) return;
+  const startKey = "tutorial_start_" + current.id;
+  if (!state.flags.has(startKey)) {
+    state.flags.add(startKey);
+    if (current.onStart) current.onStart();
+  }
+  updateHud();
+}
+
+function tutorialPrint() {
+  tutorialStatus();
+}
+
+function tutorialStatus() {
+  writeLine("TUTORIAL", "header");
+  TUTORIAL_STEPS.forEach((step, i) => {
+    const done = state.tutorial.completed.has(step.id) ? "[X]" : "[ ]";
+    const here = i === state.tutorial.stepIndex ? " <" : "";
+    writeLine(`${done} ${step.title}${here}`, "dim");
+    if (i === state.tutorial.stepIndex && state.tutorial.enabled) {
+      writeLine("  " + step.hint, "dim");
+    }
+  });
+}
+
+function tutorialNextHint() {
+  tutorialAdvance();
+}
+
+function tutorialSetEnabled(enabled) {
+  state.tutorial.enabled = Boolean(enabled);
+  if (state.tutorial.enabled) tutorialAdvance();
+  updateHud();
+}
+
+function listInventory() {
+  if (!state.inventory.size && !Object.keys(state.kit).length) {
+    writeLine("Inventory empty.", "dim");
+    return;
+  }
+  if (state.inventory.size) {
+    writeLine("Items: " + Array.from(state.inventory).sort().join(", "), "dim");
+  }
+  if (Object.keys(state.kit).length) {
+    writeLine("Kit: " + Object.keys(state.kit).sort().join(", "), "dim");
+  }
+}
+
+function decodeCipher(type, payload) {
+  const data = payload || state.lastCipher;
+  if (!data) {
+    writeLine("No cached cipher. Read a cipher file first.", "warn");
+    return;
+  }
+  let output = "";
+  if (type === "rot13") {
+    output = data.replace(/[a-zA-Z]/g, (c) => {
+      const base = c <= "Z" ? 65 : 97;
+      return String.fromCharCode(((c.charCodeAt(0) - base + 13) % 26) + base);
+    });
+  } else if (type === "b64") {
+    try {
+      output = atob(data);
+    } catch {
+      writeLine("Base64 decode failed.", "error");
+      return;
+    }
+  } else {
+    writeLine("Unknown cipher type. Use rot13 or b64.", "warn");
+    return;
+  }
+  writeLine("Decoded:", "header");
+  writeBlock(output, "ok");
+  const upper = output.toUpperCase();
+  if (upper.includes("EMBER")) state.flags.add("ember_phrase");
+  if (upper.includes("LATTICE")) state.flags.add("lattice_sigil");
+}
+
+const trustScripts = {
+  "scripts.trust.scan": {
+    owner: "scripts.trust",
+    name: "scan",
+    sec: "FULLSEC",
+    run: (ctx) => {
+      ctx.print("Scanning...");
+      listLocs();
+      setMark("mark.scan");
+    },
+  },
+  "scripts.trust.get_level": {
+    owner: "scripts.trust",
+    name: "get_level",
+    sec: "FULLSEC",
+    run: (ctx, args) => {
+      const target = args._[0];
+      if (!target) {
+        ctx.print("Usage: call scripts.trust.get_level <script>");
+        return;
+      }
+      const script = resolveScript(target);
+      if (!script) {
+        ctx.print("Script not found.");
+        return;
+      }
+      ctx.print(`${script.owner}.${script.name} :: ${script.sec}`);
+    },
+  },
+  "scripts.trust.probe": {
+    owner: "scripts.trust",
+    name: "probe",
+    sec: "FULLSEC",
+    run: (ctx, args) => {
+      const target = args._[0];
+      if (!target) {
+        ctx.print("Usage: call scripts.trust.probe <loc>");
+        return;
+      }
+      const loc = getLoc(target);
+      if (!loc) {
+        ctx.print("Loc not found.");
+        return;
+      }
+      if (!state.discovered.has(target)) {
+        ctx.print("Loc not discovered.");
+        return;
+      }
+      if (!loc.locks.length) {
+        ctx.print("No locks detected.");
+        return;
+      }
+      ctx.print(`LOCK STACK (${loc.locks.length})`);
+      loc.locks.forEach((lock, index) => ctx.print(`${index + 1}. ${lock.prompt}`));
+    },
+  },
+  "scripts.trust.accts.balance": {
+    owner: "scripts.trust",
+    name: "accts.balance",
+    sec: "HIGHSEC",
+    run: (ctx) => {
+      ctx.print(`GC balance: ${state.gc}`);
+    },
+  },
+  "scripts.trust.sys.loc": {
+    owner: "scripts.trust",
+    name: "sys.loc",
+    sec: "LOWSEC",
+    run: (ctx) => {
+      ctx.print(`Current loc: ${state.loc}`);
+    },
+  },
+  "scripts.trust.marks": {
+    owner: "scripts.trust",
+    name: "marks",
+    sec: "FULLSEC",
+    run: () => listMarks(),
+  },
+  "scripts.trust.chats.send": {
+    owner: "scripts.trust",
+    name: "chats.send",
+    sec: "FULLSEC",
+    run: (_ctx, args) => {
+      const msg = (args.msg || args._.join(" ") || "").trim();
+      if (!msg) {
+        chatSystem("Usage: call scripts.trust.chats.send msg=\"hello\"");
+        return;
+      }
+      chatPost({ body: msg });
+    },
+  },
+  "scripts.trust.chats.join": {
+    owner: "scripts.trust",
+    name: "chats.join",
+    sec: "MIDSEC",
+    run: (_ctx, args) => {
+      const channel = (args.chan || args._[0] || "").trim();
+      if (!channel) {
+        chatSystem("Usage: call scripts.trust.chats.join chan=\"#kernel\"");
+        return;
+      }
+      chatJoin(channel);
+    },
+  },
+  "scripts.trust.chats.switch": {
+    owner: "scripts.trust",
+    name: "chats.switch",
+    sec: "FULLSEC",
+    run: (_ctx, args) => {
+      const channel = (args.chan || args._[0] || "").trim();
+      if (!channel) {
+        chatSystem("Usage: call scripts.trust.chats.switch chan=\"#kernel\"");
+        return;
+      }
+      chatSwitch(channel);
+    },
+  },
+  "scripts.trust.chats.tell": {
+    owner: "scripts.trust",
+    name: "chats.tell",
+    sec: "FULLSEC",
+    run: (_ctx, args) => {
+      const npc = (args.to || args._[0] || "").trim();
+      const msg = (args.msg || args._.slice(1).join(" ") || "").trim();
+      if (!npc) {
+        chatSystem("Usage: call scripts.trust.chats.tell to=\"juniper\" msg=\"hi\"");
+        return;
+      }
+      tellNpc(npc, msg);
+    },
+  },
+};
+
+function resolveScript(name) {
+  if (!name) return null;
+  if (trustScripts[name]) return trustScripts[name];
+
+  if (name.startsWith("kit.")) {
+    const kitName = name.slice(4);
+    return state.kit[kitName] || null;
+  }
+
+  if (name.includes(".")) {
+    const prefix = `${state.handle}.`;
+    if (state.handle && name.startsWith(prefix)) {
+      const local = name.slice(prefix.length);
+      const s = state.userScripts[local];
+      if (s) return { ...s, owner: state.handle };
+    }
+    return null;
+  }
+
+  if (state.userScripts[name]) return { ...state.userScripts[name], owner: state.handle };
+  if (state.kit[name]) return state.kit[name];
+  return null;
+}
+
+function buildContext(currentScript, outputKind) {
+  const kind = outputKind || "dim";
+  return {
+    print: (msg) => writeBlock(String(msg), kind),
+    scratch: (msg) => scratchAppend(String(msg)),
+    discover: (locs) => {
+      const added = discover(locs || []);
+      if (added.length) writeLine("New signals: " + added.join(", "), "ok");
+    },
+    flag: (flag) => state.flags.add(flag),
+    flagged: (flag) => state.flags.has(flag),
+    addItem: (item) => state.inventory.add(item),
+    hasItem: (item) => state.inventory.has(item),
+    call: (scriptName, scriptArgs) => runScript(scriptName, scriptArgs, currentScript),
+    loc: () => state.loc,
+  };
+}
+
+function runUserScript(script, args) {
+  const ctx = buildContext(script, "dim");
+  try {
+    const fn = new Function("ctx", "args", `"use strict";\n${script.code}`);
+    fn(ctx, args);
+  } catch (err) {
+    writeLine(`Script error: ${err.message}`, "error");
+  }
+}
+
+function runScript(name, args, caller) {
+  const script = typeof name === "string" ? resolveScript(name) : name;
+  if (!script) {
+    writeLine("Script not found.", "error");
+    return;
+  }
+
+  const callerSec = caller ? caller.sec : "FULLSEC";
+  if (secRank(script.sec) < secRank(callerSec)) {
+    writeLine(
+      `SECURITY VIOLATION: ${callerSec} cannot call ${script.sec}`,
+      "error"
+    );
+    return;
+  }
+
+  const header = `running ${script.owner}.${script.name} [${script.sec}]`;
+  writeLine(header, script.owner === "scripts.trust" ? "trust" : "dim");
+
+  if (script.owner === "scripts.trust") {
+    script.run(buildContext(script, "trust"), args || { _: [] });
+  } else {
+    runUserScript(script, args || { _: [] });
+  }
+
+  // Some scripts affect loc requirements via flags/items; reflect that in chat.
+  if (script.owner !== "scripts.trust" && script.name === "tracer") {
+    chatPost({ channel: "#kernel", from: "switchboard", body: "Signals updated. Try `breach archives.arc` next." });
+  }
+  if (script.owner === "scripts.trust" && script.name === "scan") {
+    tutorialNextHint();
+  }
+}
+
+function updateHud() {
+  gcSpan.textContent = state.gc;
+  traceSpan.textContent = `${state.trace}/${state.traceMax}`;
+  const dl = state.downloads && (state.downloads.active || state.downloads.queue.length);
+  let dlStatus = "";
+  if (state.downloads.active) {
+    const now = Date.now();
+    const elapsed = now - state.downloads.active.startedAt;
+    const pct = Math.max(
+      0,
+      Math.min(100, Math.floor((elapsed / state.downloads.active.durationMs) * 100))
+    );
+    dlStatus = ` | dl ${state.downloads.active.file} ${pct}% (+${state.downloads.queue.length})`;
+  } else if (state.downloads.queue.length) {
+    dlStatus = ` | dl queue ${state.downloads.queue.length}`;
+  }
+
+  statusLine.textContent = state.handle
+    ? `${state.handle}@${state.loc}${dlStatus}`
+    : "enter handle or type load";
+  prompt.textContent = state.editor ? "edit>" : ">>";
+
+  if (hint) {
+    const current = tutorialCurrent();
+    if (current && state.tutorial.enabled) {
+      hint.textContent = `Objective: ${current.title} — ${current.hint}`;
+    } else {
+      hint.textContent =
+        "Type `help` for commands. Use `scripts` to list available scripts.";
+    }
+  }
+}
+
+function storyChatTick() {
+  if (!state.handle) return;
+  if (state.loc === "home.hub" && !state.flags.has("chat_intro")) {
+    state.flags.add("chat_intro");
+    chatPost({
+      channel: "#kernel",
+      from: "switchboard",
+      body: "Run scripts.trust.scan. The Drift is talking tonight.",
+    });
+    return;
+  }
+  if (state.flags.has("ember_phrase") && !state.flags.has("chat_ember")) {
+    state.flags.add("chat_ember");
+    chatPost({
+      channel: "#kernel",
+      from: "switchboard",
+      body: "Good. Ember confirmed. Breach sable.gate and don't spike trace.",
+    });
+    return;
+  }
+  if (state.unlocked.has("archives.arc") && !state.flags.has("chat_archive")) {
+    state.flags.add("chat_archive");
+    chatPost({
+      channel: "#kernel",
+      from: "archivist",
+      body: "If you can read the sigil, the lattice can read you back.",
+    });
+  }
+  if (state.flags.has("sniffer_run") && !state.flags.has("chat_sniffer")) {
+    state.flags.add("chat_sniffer");
+    chatPost({
+      channel: "#kernel",
+      from: "switchboard",
+      body: "Sniffer found a public beacon and a Weaver den. Both can help.",
+    });
+    return;
+  }
+  if (state.unlocked.has("monument.beacon") && !state.flags.has("chat_beacon")) {
+    state.flags.add("chat_beacon");
+    chatPost({
+      channel: "#kernel",
+      from: "monument",
+      body: "IN RISK WE TRUST",
+      kind: "trust",
+    });
+    return;
+  }
+  if (state.flags.has("q_juniper_mask") && !state.flags.has("chat_juniper_contract")) {
+    state.flags.add("chat_juniper_contract");
+    chatPost({
+      channel: "#kernel",
+      from: "juniper",
+      body: "DM me for work: `tell juniper work`.",
+    });
+  }
+}
+
+function listScripts() {
+  writeLine("TRUST SCRIPTS", "header");
+  Object.keys(trustScripts)
+    .sort()
+    .forEach((name) => writeLine(`${name} [${trustScripts[name].sec}]`, "trust"));
+
+  writeLine("USER SCRIPTS", "header");
+  const userNames = Object.keys(state.userScripts);
+  if (!userNames.length) writeLine("(none)", "dim");
+  userNames
+    .sort()
+    .forEach((name) => writeLine(`${state.handle}.${name} [${state.userScripts[name].sec}]`, "dim"));
+
+  writeLine("KIT SCRIPTS", "header");
+  const kitNames = Object.keys(state.kit);
+  if (!kitNames.length) writeLine("(none)", "dim");
+  kitNames
+    .sort()
+    .forEach((name) => writeLine(`kit.${name} [${state.kit[name].sec}]`, "dim"));
+}
+
+function canAttemptLoc(locName) {
+  const loc = getLoc(locName);
+  const req = (loc && loc.requirements) || {};
+  const missingItems = (req.items || []).filter((item) => !state.inventory.has(item));
+  const missingFlags = (req.flags || []).filter((flag) => !state.flags.has(flag));
+  return { ok: !missingItems.length && !missingFlags.length, missingItems, missingFlags };
+}
+
+function startBreach(locName) {
+  const loc = getLoc(locName);
+  if (!loc) {
+    writeLine("Loc not found.", "error");
+    return;
+  }
+  if (!state.discovered.has(locName)) {
+    writeLine("Loc not discovered.", "warn");
+    return;
+  }
+  if (state.unlocked.has(locName)) {
+    writeLine("Loc already unlocked.", "dim");
+    return;
+  }
+  const req = canAttemptLoc(locName);
+  if (!req.ok) {
+    const needs = [];
+    if (req.missingItems.length) needs.push("items: " + req.missingItems.join(", "));
+    if (req.missingFlags.length) needs.push("signals: " + req.missingFlags.join(", "));
+    writeLine("Pre-check failed. Missing " + needs.join(" | "), "warn");
+    return;
+  }
+  state.breach = { loc: locName, index: 0 };
+  writeLine(`BREACHING ${locName}`, "header");
+  chatPost({
+    channel: "#kernel",
+    from: "trust",
+    body: `breach.start ${locName}`,
+    kind: "trust",
+  });
+  if (!loc.locks.length) {
+    writeLine("No locks detected. Access open.", "ok");
+    state.unlocked.add(locName);
+    setMark("mark.breach");
+    state.breach = null;
+    return;
+  }
+  writeLine(loc.locks[0].prompt, "warn");
+}
+
+function failBreach() {
+  state.trace += 1;
+  if (state.trace >= state.traceMax) {
+    writeLine("TRACE LIMIT HIT. CONNECTION DROPPED.", "error");
+    state.loc = "home.hub";
+    state.trace = 0;
+    state.breach = null;
+    showLoc();
+    return;
+  }
+  writeLine(`TRACE +1 (${state.trace}/${state.traceMax})`, "warn");
+}
+
+function unlockAttempt(answer) {
+  if (!state.breach) {
+    writeLine("No active breach.", "warn");
+    return;
+  }
+  const loc = getLoc(state.breach.loc);
+  const lock = loc.locks[state.breach.index];
+  if (!lock) {
+    writeLine("Lock stack exhausted.", "dim");
+    state.breach = null;
+    return;
+  }
+  const normalized = String(answer || "").trim();
+  if (!normalized) {
+    writeLine("Supply an answer.", "warn");
+    return;
+  }
+  if (normalized.toUpperCase() === lock.answer.toUpperCase()) {
+    writeLine("LOCK CLEARED", "ok");
+    chatPost({
+      channel: "#kernel",
+      from: "trust",
+      body: "lock.cleared",
+      kind: "trust",
+    });
+    state.breach.index += 1;
+    if (state.breach.index >= loc.locks.length) {
+      writeLine("STACK CLEARED. ACCESS OPEN.", "ok");
+      state.unlocked.add(state.breach.loc);
+      setMark("mark.breach");
+      chatPost({
+        channel: "#kernel",
+        from: "trust",
+        body: `breach.success ${state.breach.loc}`,
+        kind: "trust",
+      });
+      state.breach = null;
+      return;
+    }
+    writeLine(loc.locks[state.breach.index].prompt, "warn");
+    return;
+  }
+  writeLine("LOCK FAILED.", "error");
+  writeLine("Hint: " + lock.hint, "dim");
+  failBreach();
+}
+
+function connectLoc(locName) {
+  if (!state.discovered.has(locName)) {
+    writeLine("Unknown loc. Run scripts.trust.scan or discover it.", "warn");
+    return;
+  }
+  if (!state.unlocked.has(locName)) {
+    writeLine("Access denied. Use breach to solve the lock stack.", "warn");
+    return;
+  }
+  state.loc = locName;
+  showLoc();
+  if (!state.flags.has("seen_" + locName)) {
+    state.flags.add("seen_" + locName);
+    if (locName === "monument.beacon") {
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "That motto is everywhere. Breach it if you want the coolant.",
+      });
+    }
+    if (locName === "public.exchange") {
+      npcIntroduce("juniper");
+    }
+    if (locName === "archives.arc") {
+      npcIntroduce("archivist");
+    }
+    if (locName === "weaver.den") {
+      npcIntroduce("weaver");
+    }
+    if (locName === "echo.after") {
+      chatPost({
+        channel: "#kernel",
+        from: "echo",
+        body: "Install upgrades. Cool trace. Then decide what kind of operator you are.",
+      });
+    }
+  }
+}
+
+function setEditor(name) {
+  state.editor = { name, lines: [] };
+  writeLine("EDITOR MODE :: type :wq to save, :q to abort", "warn");
+  writeLine(`Editing ${state.handle}.${name}`, "dim");
+  writeLine("Tip: add `// @sec FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC`", "dim");
+}
+
+function finishEditor(save) {
+  const editor = state.editor;
+  state.editor = null;
+  if (!save) {
+    writeLine("Editor aborted.", "warn");
+    return;
+  }
+  const code = editor.lines.join("\n");
+  const match = code.match(/@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i);
+  const sec = match ? match[1].toUpperCase() : "FULLSEC";
+  state.userScripts[editor.name] = { owner: state.handle, name: editor.name, sec, code };
+  writeLine(`Saved ${state.handle}.${editor.name} [${sec}]`, "ok");
+  setMark("mark.edit");
+}
+
+function saveState() {
+  const data = {
+    handle: state.handle,
+    loc: state.loc,
+    gc: state.gc,
+    discovered: Array.from(state.discovered),
+    unlocked: Array.from(state.unlocked),
+    inventory: Array.from(state.inventory),
+    kit: state.kit,
+    userScripts: state.userScripts,
+    flags: Array.from(state.flags),
+    marks: Array.from(state.marks),
+    upgrades: Array.from(state.upgrades),
+    tutorial: {
+      enabled: state.tutorial.enabled,
+      stepIndex: state.tutorial.stepIndex,
+      completed: Array.from(state.tutorial.completed),
+    },
+    npcs: {
+      known: Array.from(state.npcs.known),
+    },
+    scratch: scratchPad ? scratchPad.value : "",
+    chat: {
+      channel: state.chat.channel,
+      channels: Array.from(state.chat.channels),
+      log: state.chat.log,
+    },
+    trace: state.trace,
+    traceMax: state.traceMax,
+    lastCipher: state.lastCipher,
+  };
+  localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  writeLine("State saved.", "ok");
+}
+
+function loadState(options) {
+  const opts = options || {};
+  const raw = localStorage.getItem(SAVE_KEY);
+  if (!raw) {
+    if (!opts.silent) writeLine("No save found.", "warn");
+    return false;
+  }
+  const data = JSON.parse(raw);
+  state.handle = data.handle;
+  state.loc = data.loc || "home.hub";
+  state.gc = data.gc ?? 0;
+  state.discovered = new Set(data.discovered || []);
+  state.unlocked = new Set(data.unlocked || []);
+  state.inventory = new Set(data.inventory || []);
+  state.kit = data.kit || {};
+  state.userScripts = data.userScripts || {};
+  state.flags = new Set(data.flags || []);
+  state.marks = new Set(data.marks || []);
+  state.upgrades = new Set(data.upgrades || []);
+  if (data.tutorial) {
+    state.tutorial.enabled = data.tutorial.enabled !== false;
+    state.tutorial.stepIndex = data.tutorial.stepIndex || 0;
+    state.tutorial.completed = new Set(data.tutorial.completed || []);
+  }
+  if (data.npcs) {
+    state.npcs.known = new Set(data.npcs.known || ["switchboard"]);
+  }
+  if (scratchPad) {
+    if (typeof data.scratch === "string") {
+      scratchPad.value = data.scratch;
+      saveScratchToStorage();
+    } else {
+      loadScratchFromStorage();
+    }
+  }
+  state.trace = data.trace || 0;
+  state.traceMax = data.traceMax || 4;
+  state.lastCipher = data.lastCipher || null;
+  if (data.chat) {
+    state.chat.channel = data.chat.channel || "#kernel";
+    state.chat.channels = new Set(data.chat.channels || ["#kernel"]);
+    state.chat.log = (data.chat.log || state.chat.log).map((m) => ({
+      ...m,
+      color: m.kind === "trust" ? null : m.color || userColorClass(m.from),
+      uid: m.uid || (m.kind === "trust" ? "0000" : userId4(m.from)),
+    }));
+    renderChat();
+  }
+  // scratchpad is user-authored; don't clear on load
+  if (!opts.silent) writeLine("State loaded.", "ok");
+  showLoc();
+  storyChatTick();
+  tutorialAdvance();
+  return true;
+}
+
+function handleCommand(inputText) {
+  const raw = String(inputText || "");
+  const trimmed = raw.trim();
+  if (!trimmed) return;
+
+  if (state.editor) {
+    if (trimmed === ":q") {
+      finishEditor(false);
+      updateHud();
+      return;
+    }
+    if (trimmed === ":wq") {
+      finishEditor(true);
+      updateHud();
+      return;
+    }
+    state.editor.lines.push(raw);
+    return;
+  }
+
+  if (!state.handle) {
+    if (trimmed.toLowerCase() === "load") {
+      loadState();
+      updateHud();
+      return;
+    }
+    state.handle = trimmed || "ghost";
+    writeLine(`HANDLE SET: ${state.handle}`, "ok");
+    chatPost({ channel: "#kernel", from: state.handle, body: "connected" });
+    loadScratchFromStorage();
+    showLoc();
+    storyChatTick();
+    tutorialPrint();
+    updateHud();
+    return;
+  }
+
+  const parts = splitArgs(trimmed);
+  const cmd = (parts[0] || "").toLowerCase();
+  const args = parts.slice(1);
+  const flags = new Set(args.filter((a) => a.startsWith("--")));
+
+  switch (cmd) {
+    case "help":
+      if (args[0]) {
+        const topic = args[0].toLowerCase();
+        const wantsArgs = args[1] === "?";
+
+        if (topic === "scripts") {
+          writeLine("help scripts", "header");
+          writeLine("List scripts: `scripts`", "dim");
+          writeLine("Check sec level: `call scripts.trust.get_level scripts.trust.scan`", "dim");
+          writeLine("Run a kit script: `call kit.tracer`", "dim");
+          break;
+        }
+
+        if (topic === "call" || topic === "run") {
+          writeLine("help call", "header");
+          writeLine("Usage: `call <script> [args]`", "dim");
+          writeLine("Trust: `call scripts.trust.accts.balance`", "dim");
+          writeLine("Kit: `call kit.tracer`", "dim");
+          writeLine("Named args: `call scripts.trust.chats.send msg=\"hello\"`", "dim");
+          if (wantsArgs) {
+            writeLine("Args format:", "header");
+            writeLine("Positional: `call some.script a b c` -> `args._ = [\"a\",\"b\",\"c\"]`", "dim");
+            writeLine("Named: `call some.script key=value` -> `args.key = \"value\"`", "dim");
+            writeLine("Quotes: `msg=\"hello world\"` (values are strings)", "dim");
+          } else {
+            writeLine("Tip: `help call ?` to see args format.", "dim");
+          }
+          break;
+        }
+
+        if (topic === "download") {
+          writeLine("help download", "header");
+          writeLine("Queue file downloads. Time depends on file size.", "dim");
+          writeLine("Single file: `download tracer.s`", "dim");
+          writeLine("Wildcard: `download *.s` (only works for `download`)", "dim");
+          writeLine("Queue status: `downloads`", "dim");
+          if (wantsArgs) {
+            writeLine("Wildcard rules:", "header");
+            writeLine("`*` matches any run of characters; `?` matches one character.", "dim");
+            writeLine("Globs only apply to `download` (not `cat`, not `breach`).", "dim");
+          }
+          break;
+        }
+
+        if (topic === "breach") {
+          writeLine("help breach", "header");
+          writeLine("Start: `breach sable.gate`", "dim");
+          writeLine("Answer: `unlock badge.sig`", "dim");
+          writeLine("If you fail too often, TRACE kicks you back. Use `wait`.", "dim");
+          break;
+        }
+
+        if (topic === "chat") {
+          writeLine("help chat", "header");
+          writeLine("Send: `say hello`", "dim");
+          writeLine("Join: `join #ops`", "dim");
+          writeLine("Switch: `switch #kernel`", "dim");
+          writeLine("DM an NPC: `tell juniper hi`", "dim");
+          writeLine("Or use the chat box: `/help`, `/join #ops`", "dim");
+          break;
+        }
+
+        writeLine("Unknown help topic. Try: `help`", "warn");
+        break;
+      }
+
+      writeBlock(
+        [
+          "Commands:",
+          "  scan | probe <loc> | connect <loc>",
+          "  breach <loc> | unlock <answer> | wait",
+          "  ls | cat <file> | download <file|glob> | downloads",
+          "  scripts | call <script> [args] | edit <name> | decode rot13|b64 [text]",
+          "  say <text> | join #chan | switch #chan | channels | tell <npc> <msg>",
+          "  inventory | install <upgrade> | marks",
+          "  save | load | reset | clear | restart --confirm",
+          "",
+          "Tips:",
+          "  help call        (examples)",
+          "  help call ?      (args format)",
+          "  help download    (queue + wildcards)",
+          "  help download ?  (glob rules)",
+        ].join("\n"),
+        "dim"
+      );
+      break;
+    case "scripts":
+      listScripts();
+      break;
+    case "call":
+    case "run":
+      if (!args.length) {
+        writeLine("Usage: call <script> [args]", "warn");
+        break;
+      }
+      runScript(args[0], parseScriptArgs(args.slice(1)));
+      break;
+    case "edit":
+      if (!args.length) {
+        writeLine("Usage: edit <name>", "warn");
+        break;
+      }
+      setEditor(args[0]);
+      break;
+    case "scan":
+      runScript("scripts.trust.scan", { _: [] });
+      storyChatTick();
+      tutorialNextHint();
+      break;
+    case "probe":
+      runScript("scripts.trust.probe", parseScriptArgs(args));
+      break;
+    case "connect":
+      if (!args.length) {
+        writeLine("Usage: connect <loc>", "warn");
+        break;
+      }
+      connectLoc(args[0]);
+      storyChatTick();
+      tutorialNextHint();
+      break;
+    case "breach":
+      if (!args.length) {
+        writeLine("Usage: breach <loc>", "warn");
+        break;
+      }
+      startBreach(args[0]);
+      break;
+    case "unlock":
+      unlockAttempt(args.join(" "));
+      storyChatTick();
+      tutorialNextHint();
+      break;
+    case "ls":
+      listFiles();
+      break;
+    case "cat":
+      if (!args.length) {
+        writeLine("Usage: cat <file>", "warn");
+        break;
+      }
+      readFile(args[0]);
+      storyChatTick();
+      break;
+    case "download":
+      if (!args.length) {
+        writeLine("Usage: download <file>", "warn");
+        break;
+      }
+      downloadCommand(args[0]);
+      storyChatTick();
+      tutorialNextHint();
+      break;
+    case "downloads":
+      downloadsStatus();
+      break;
+    case "inventory":
+      listInventory();
+      break;
+    case "decode": {
+      const type = (args[0] || "").toLowerCase();
+      if (!type) {
+        writeLine("Usage: decode rot13|b64 [text]", "warn");
+        break;
+      }
+      const payload = args.slice(1).join(" ");
+      decodeCipher(type === "base64" ? "b64" : type, payload);
+      break;
+    }
+    case "marks":
+      runScript("scripts.trust.marks", { _: [] });
+      break;
+    case "say":
+      chatPost({ body: args.join(" ") });
+      break;
+    case "join":
+      chatJoin(args[0] || "#kernel");
+      break;
+    case "switch":
+      chatSwitch(args[0] || "#kernel");
+      break;
+    case "channels":
+      chatSystem("channels: " + Array.from(state.chat.channels).sort().join(", "));
+      break;
+    case "install":
+      installUpgrade(args[0]);
+      break;
+    case "wait":
+      waitTick();
+      break;
+    case "tutorial":
+      if (args[0] === "off") tutorialSetEnabled(false);
+      else if (args[0] === "on") tutorialSetEnabled(true);
+      else if (args[0] === "reset") {
+        state.tutorial.stepIndex = 0;
+        state.tutorial.completed = new Set();
+        state.flags.forEach((f) => {
+          if (String(f).startsWith("tutorial_start_")) state.flags.delete(f);
+        });
+        tutorialAdvance();
+      }
+      tutorialPrint();
+      break;
+    case "contacts":
+      listContacts();
+      break;
+    case "tell":
+      tellNpc(args[0], args.slice(1).join(" "));
+      break;
+    case "reset": {
+      const confirm = flags.has("--confirm");
+      if (!confirm) {
+        writeLine("WARNING: this deletes your saved game (localStorage).", "warn");
+        writeLine("Type: reset --confirm", "warn");
+        break;
+      }
+      localStorage.removeItem(SAVE_KEY);
+      writeLine("Save deleted.", "ok");
+      break;
+    }
+    case "restart": {
+      const confirm = flags.has("--confirm");
+      if (!confirm) {
+        writeLine("WARNING: this restarts from scratch and deletes your save.", "warn");
+        writeLine("Type: restart --confirm", "warn");
+        break;
+      }
+      localStorage.removeItem(SAVE_KEY);
+      screen.innerHTML = "";
+      resetToFreshState(true);
+      writeLine("Restarted.", "ok");
+      writeLine("Enter a handle to begin.", "dim");
+      break;
+    }
+    case "save":
+      saveState();
+      break;
+    case "load":
+      loadState();
+      break;
+    case "reset":
+      localStorage.removeItem(SAVE_KEY);
+      writeLine("Save cleared.", "warn");
+      break;
+    case "clear":
+      screen.innerHTML = "";
+      break;
+    case "exfiltrate":
+      if (state.loc !== "core.relic") {
+        writeLine("No target to exfiltrate here.", "warn");
+        break;
+      }
+      state.flags.add("touched_relic");
+      discover(["echo.after"]);
+      state.unlocked.add("echo.after");
+      chatPost({
+        channel: "#kernel",
+        from: "archivist",
+        body: "If you took it, follow the echo. (connect echo.after)",
+      });
+      writeBlock(
+        [
+          "You lift the relic into your shell. The Drift goes quiet behind you.",
+          "A new story begins, sealed from the old net.",
+        ].join("\n"),
+        "ok"
+      );
+      break;
+    case "restore":
+      if (state.loc !== "core.relic") {
+        writeLine("No target to restore here.", "warn");
+        break;
+      }
+      state.flags.add("touched_relic");
+      discover(["echo.after"]);
+      state.unlocked.add("echo.after");
+      chatPost({
+        channel: "#kernel",
+        from: "archivist",
+        body: "You left it, but it left a mark. Follow the echo. (connect echo.after)",
+      });
+      writeBlock(
+        [
+          "You bind the relic back to the Drift. The net exhales.",
+          "The archive sleeps, but its signal will haunt the edges.",
+        ].join("\n"),
+        "ok"
+      );
+      break;
+    default:
+      writeLine("Unknown command. Type help.", "warn");
+      break;
+  }
+
+  tutorialAdvance();
+  updateHud();
+}
+
+input.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const raw = input.value;
+    // Always clear immediately so the box empties even if command handling errors.
+    input.value = "";
+    const value = String(raw || "").trim();
+    if (!value) return;
+
+    writeLine(`${prompt.textContent} ${value}`, "dim");
+    state.history.push(value);
+    state.historyIndex = state.history.length;
+    try {
+      handleCommand(value);
+    } catch (err) {
+      // Keep UI responsive; surface the actual error to help debugging.
+      try {
+        // eslint-disable-next-line no-console
+        console.error(err);
+      } catch {}
+      const msg =
+        err && typeof err === "object" && "message" in err
+          ? String(err.message)
+          : String(err);
+      writeLine(`Command error: ${msg}`, "error");
+    }
+    return;
+  }
+
+  if (event.key === "ArrowUp") {
+    if (!state.history.length) return;
+    state.historyIndex = Math.max(0, state.historyIndex - 1);
+    input.value = state.history[state.historyIndex] || "";
+    event.preventDefault();
+    return;
+  }
+
+  if (event.key === "ArrowDown") {
+    if (!state.history.length) return;
+    state.historyIndex = Math.min(state.history.length, state.historyIndex + 1);
+    input.value = state.history[state.historyIndex] || "";
+    event.preventDefault();
+  }
+
+  if (event.key === "Tab") {
+    event.preventDefault();
+    completeInput();
+  }
+});
+
+// Don't steal focus when users are selecting/copying text from the terminal/chat.
+document.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+
+  // Allow selecting/clicking inside these panels without stealing focus.
+  if (
+    target.closest("#screen") ||
+    target.closest("#chat") ||
+    target.closest("#scratch") ||
+    target.closest("#right")
+  ) {
+    return;
+  }
+
+  if (target.closest("#cmd") || target.closest("#input-row")) {
+    input.focus();
+    return;
+  }
+
+  if (target.closest("#shell") || target.closest("#layout")) input.focus();
+});
+setTimeout(() => input.focus(), 0);
+
+if (chatInput) {
+  chatInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const raw = chatInput.value;
+    const value = raw.trim();
+    // Always clear the box on Enter (even if the command is invalid).
+    chatInput.value = "";
+    if (!value) return;
+
+    if (value.startsWith("/")) {
+      const parts = splitArgs(value.slice(1));
+      const cmd = (parts[0] || "").toLowerCase();
+      const args = parts.slice(1);
+      if (cmd === "help") {
+        chatHelp();
+        return;
+      }
+      if (cmd === "join") {
+        if (!args[0]) {
+          chatSystem("Usage: /join #channel");
+          return;
+        }
+        chatJoin(args[0]);
+        return;
+      }
+      if (cmd === "switch") {
+        if (!args[0]) {
+          chatSystem("Usage: /switch #channel");
+          return;
+        }
+        chatSwitch(args[0]);
+        return;
+      }
+      if (cmd === "channels") {
+        chatSystem("channels: " + Array.from(state.chat.channels).sort().join(", "));
+        return;
+      }
+      chatSystem("Unknown chat command. Try /help");
+      return;
+    }
+
+    chatPost({ body: value });
+  });
+}
+
+function uniqueSorted(list) {
+  return Array.from(new Set(list)).sort();
+}
+
+function allScriptNames() {
+  const trust = Object.keys(trustScripts);
+  const kit = Object.keys(state.kit).map((n) => "kit." + n);
+  const user =
+    state.handle && state.handle.length
+      ? Object.keys(state.userScripts).map((n) => state.handle + "." + n)
+      : Object.keys(state.userScripts);
+  return uniqueSorted([...trust, ...kit, ...user, ...Object.keys(state.kit), ...Object.keys(state.userScripts)]);
+}
+
+function allLocNames() {
+  return uniqueSorted(Array.from(state.discovered));
+}
+
+function allFileNames() {
+  const loc = getLoc(state.loc);
+  return uniqueSorted(Object.keys((loc && loc.files) || {}));
+}
+
+function allUpgradeNames() {
+  return uniqueSorted(Array.from(state.inventory).filter((i) => i.startsWith("upg.")));
+}
+
+function allCommandNames() {
+  return [
+    "help",
+    "scripts",
+    "call",
+    "run",
+    "edit",
+    "scan",
+    "probe",
+    "connect",
+    "breach",
+    "unlock",
+    "ls",
+    "cat",
+    "download",
+    "downloads",
+    "inventory",
+    "decode",
+    "marks",
+    "say",
+    "join",
+    "switch",
+    "channels",
+    "contacts",
+    "tell",
+    "install",
+    "wait",
+    "tutorial",
+    "save",
+    "load",
+    "reset",
+    "clear",
+    "exfiltrate",
+    "restore",
+    "restart",
+  ];
+}
+
+function completeInput() {
+  const text = input.value;
+  const cursor = input.selectionStart ?? text.length;
+  const before = text.slice(0, cursor);
+  const after = text.slice(cursor);
+
+  const match = before.match(/(^|\s)([^\s]+)$/);
+  const token = match ? match[2] : "";
+  const tokenStart = match ? before.length - token.length : before.length;
+
+  const parts = splitArgs(before);
+  const cmd = (parts[0] || "").toLowerCase();
+
+  let candidates = [];
+  if (parts.length <= 1) {
+    candidates = allCommandNames();
+  } else if (cmd === "cat" || cmd === "download") {
+    candidates = allFileNames();
+  } else if (cmd === "connect" || cmd === "breach") {
+    candidates = allLocNames();
+  } else if (cmd === "probe") {
+    candidates = allLocNames();
+  } else if (cmd === "call" || cmd === "run") {
+    candidates = allScriptNames();
+  } else if (cmd === "decode") {
+    candidates = ["rot13", "b64"];
+  } else if (cmd === "install") {
+    candidates = allUpgradeNames();
+  } else if (cmd === "join" || cmd === "switch") {
+    candidates = uniqueSorted(Array.from(state.chat.channels));
+  } else if (cmd === "tell") {
+    candidates = uniqueSorted(Object.keys(NPCS));
+  } else if (cmd === "edit") {
+    candidates = [];
+  }
+
+  const filtered = candidates.filter((c) => c.toLowerCase().startsWith(token.toLowerCase()));
+  if (!filtered.length) return;
+  if (filtered.length === 1) {
+    const next = filtered[0];
+    input.value = before.slice(0, tokenStart) + next + after;
+    const newCursor = tokenStart + next.length;
+    input.setSelectionRange(newCursor, newCursor);
+    return;
+  }
+
+  // Multiple matches: fill common prefix, then print options to screen.
+  let prefix = filtered[0];
+  for (let i = 1; i < filtered.length; i++) {
+    while (!filtered[i].toLowerCase().startsWith(prefix.toLowerCase()) && prefix.length) {
+      prefix = prefix.slice(0, -1);
+    }
+    if (!prefix.length) break;
+  }
+  if (prefix.length > token.length) {
+    input.value = before.slice(0, tokenStart) + prefix + after;
+    const newCursor = tokenStart + prefix.length;
+    input.setSelectionRange(newCursor, newCursor);
+    return;
+  }
+  writeLine(filtered.join("    "), "dim");
+}
+
+function boot() {
+  writeLine("hackterm // local drift sim", "header");
+  hookUi();
+  renderChat();
+  if (!loadState({ silent: true })) {
+    writeLine("Enter a handle to begin.", "dim");
+    writeLine("Tip: type `help` for examples, or `tutorial` to reprint steps.", "dim");
+    loadScratchFromStorage();
+    tutorialAdvance();
+  } else {
+    writeLine("Auto-loaded save.", "ok");
+    writeLine("Tip: type `restart --confirm` to start over.", "dim");
+    tutorialAdvance();
+  }
+  updateHud();
+}
+
+boot();

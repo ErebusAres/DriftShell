@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HackTerm</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="hud">
+        <div class="hud-left">
+          <div class="brand">hackterm // drift local</div>
+          <div id="status-line" class="status dim">terminal ready</div>
+        </div>
+        <div class="hud-right">
+          <div class="stat">GC <span id="gc">0</span></div>
+          <div class="stat">TRACE <span id="trace">0/0</span></div>
+        </div>
+      </header>
+
+      <div id="layout">
+        <main id="shell">
+          <div id="screen"></div>
+          <div id="input-row">
+            <span id="prompt">&gt;&gt;</span>
+            <input id="cmd" type="text" autocomplete="off" spellcheck="false" />
+          </div>
+        </main>
+
+        <aside id="right">
+          <section id="quick">
+            <div class="panel-header">
+              <div class="panel-title dim">sys</div>
+              <div class="panel-title dim">/</div>
+              <div class="panel-title dim">trust</div>
+            </div>
+            <div id="quick-links" class="quick-links">
+              <button class="quick-btn" data-call="scripts.trust.scan">scripts.trust.scan</button>
+              <button class="quick-btn" data-call="scripts.trust.accts.balance">scripts.trust.accts.balance</button>
+              <button class="quick-btn" data-call="scripts.trust.marks">scripts.trust.marks</button>
+            </div>
+          </section>
+
+          <section id="scratch">
+            <div class="panel-header">
+              <div class="panel-title dim">scratch</div>
+              <div class="panel-spacer"></div>
+              <button id="scratch-clear" class="panel-action dim">System Clear</button>
+            </div>
+            <textarea
+              id="scratch-pad"
+              spellcheck="false"
+              placeholder="notes auto-save here… (codes, locs, hints, scripts)"
+            ></textarea>
+          </section>
+
+          <section id="chat">
+            <div id="chat-header" class="panel-header">
+              <div class="panel-title dim">chat</div>
+              <div id="chat-channel" class="chat-channel dim">#kernel</div>
+            </div>
+            <div id="chat-log" aria-live="polite"></div>
+            <div id="chat-input-row">
+              <span class="dim">say</span>
+              <input
+                id="chat-input"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="type /help"
+              />
+            </div>
+          </section>
+        </aside>
+      </div>
+
+      <footer id="hint" class="dim">
+        Type `help` for commands. Use `scripts` to list available scripts.
+      </footer>
+    </div>
+    <script src="game.js" defer></script>
+  </body>
+</html>
