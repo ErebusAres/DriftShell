@@ -1295,7 +1295,7 @@ const LOCS = {
           "  'When you write scripts, you write yourself.'",
           "",
           "The rest is checksum noise.",
-        ].join(\"\\n\"),
+        ].join("\n"),
       },
       "glitch.rot13": {
         type: "text",
