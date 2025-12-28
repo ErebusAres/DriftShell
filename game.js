@@ -965,6 +965,7 @@ const LOCS = {
             "if (ctx.flagged('sniffer_run')) { ctx.print('Sniffer already swept the quiet bands.'); return; }",
             "ctx.flag('sniffer_run');",
             "ctx.discover(['weaver.den','corp.audit','lattice.cache','monument.beacon']);",
+            "ctx.print('Weaver phrase acquired: THREAD THE DRIFT');",
             "ctx.print('Sniffer pulse complete.');",
           ].join("\n"),
         },
@@ -1074,7 +1075,7 @@ const LOCS = {
       {
         prompt: "LOCK: supply a weave phrase",
         answer: "THREAD THE DRIFT",
-        hint: "Search weaver.log for the phrase.",
+        hint: "Run sniffer first. It prints the phrase.",
       },
     ],
     links: ["public.exchange", "corp.audit", "lattice.cache"],
@@ -1126,6 +1127,7 @@ const LOCS = {
             "if (!ctx.hasItem('weaver.mark')) { ctx.print('Ghost protocol requires weaver.mark.'); return; }",
             "ctx.flag('ghosted');",
             "ctx.discover(['corp.audit']);",
+            "ctx.print('Audit shard sequence: 3-1-4');",
             "ctx.print('Ghost protocol active. Trail is cold.');",
           ].join("\n"),
         },
@@ -1143,7 +1145,7 @@ const LOCS = {
       {
         prompt: "LOCK: supply the shard sequence (3-1-4)",
         answer: "3-1-4",
-        hint: "Audit log lists the shard order.",
+        hint: "Run ghost.s; it prints the sequence.",
       },
     ],
     links: ["weaver.den"],
@@ -1219,13 +1221,7 @@ const LOCS = {
       "Somebody left a beacon lit in the drift like it wanted to be found.",
     ],
     requirements: { flags: ["sniffer_run"] },
-    locks: [
-      {
-        prompt: "LOCK: submit the beacon phrase",
-        answer: "IN RISK WE TRUST",
-        hint: "Read plaque.txt and listen to the chat.",
-      },
-    ],
+    locks: [],
     links: ["public.exchange"],
     files: {
       "plaque.txt": {
@@ -1239,7 +1235,7 @@ const LOCS = {
       "beacon.b64": {
         type: "text",
         cipher: true,
-        content: "QkVBQ09OOiBTTElQRVIgSU4gVEhFIERSSUZU",
+        content: "QkVBQ09OOiBTTElQUEVSIElOIFRIRSBEUklGVA==",
       },
       "coolant.upg": {
         type: "upgrade",
@@ -1275,6 +1271,36 @@ const LOCS = {
         content: ["UPGRADE: TRACE_SPOOL", "Coils that widen your trace budget."].join(
           "\n"
         ),
+      },
+    },
+  },
+  "slipper.hole": {
+    title: "SLIPPER.HOLE",
+    desc: [
+      "A seam in the Drift you can only see after the beacon words land.",
+      "It smells like burnt ozone and old formatting.",
+    ],
+    requirements: { flags: ["slipper_signal"] },
+    locks: [],
+    links: ["home.hub", "monument.beacon"],
+    files: {
+      "slipper.log": {
+        type: "text",
+        content: [
+          "SLIPPER HOLE",
+          "You shouldn't be able to route here on a local net.",
+          "But the Drift doesn't care what 'local' means.",
+          "",
+          "Somebody left a note in a dead protocol:",
+          "  'When you write scripts, you write yourself.'",
+          "",
+          "The rest is checksum noise.",
+        ].join(\"\\n\"),
+      },
+      "glitch.rot13": {
+        type: "text",
+        cipher: true,
+        content: "gur qevsg qbrfa'g gel gb oernx lbh. vg gebjf lbh.",
       },
     },
   },
@@ -2005,6 +2031,8 @@ function decodeCipher(type, payload) {
   const upper = output.toUpperCase();
   if (upper.includes("EMBER")) state.flags.add("ember_phrase");
   if (upper.includes("LATTICE")) state.flags.add("lattice_sigil");
+  if (upper.includes("SLIPPER")) state.flags.add("slipper_signal");
+  storyChatTick();
 }
 
 const trustScripts = {
@@ -2305,6 +2333,18 @@ function storyChatTick() {
       from: "switchboard",
       body: "Sniffer found a public beacon and a Weaver den. Both can help.",
     });
+    return;
+  }
+  if (state.flags.has("slipper_signal") && !state.flags.has("chat_slipper")) {
+    state.flags.add("chat_slipper");
+    const added = discover(["slipper.hole"]);
+    if (added.length) {
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Beacon decoded. A thin spot opened: `slipper.hole`.",
+      });
+    }
     return;
   }
   if (state.unlocked.has("monument.beacon") && !state.flags.has("chat_beacon")) {
