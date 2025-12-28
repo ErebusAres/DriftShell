@@ -2,6 +2,10 @@
 
 A local, single-player game inspired by hackmud's terminal aesthetic and script-driven mechanics.
 
+## Play (GitHub Pages)
+
+Once GitHub Pages is enabled, play at `https://erebusares.github.io/DriftShell/`.
+
 ## Play (recommended: web UI)
 
 Open `index.html` (double-click) to launch the terminal UI using the bundled `whiterabbit-webfont.ttf`.
@@ -23,7 +27,4 @@ Then open `http://localhost:8080/`.
 - Use `breach <loc>` and `unlock <answer>` to clear lock stacks.
 - Use `decode rot13` / `decode b64` after reading cipher files.
 - Use `save` / `load` to persist progress (saved in browser localStorage).
-
-## Legacy (Python version)
-
-The old Python CLI prototype has been removed; the web UI is the current direction for hackmud-like visualization.
+- Use `export` / `import` to move saves between browsers (or back up).

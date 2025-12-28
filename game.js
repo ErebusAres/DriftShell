@@ -47,12 +47,138 @@ const scratchPad = document.getElementById("scratch-pad");
 const scratchClear = document.getElementById("scratch-clear");
 const quickLinks = document.getElementById("quick-links");
 
+let saveDirty = false;
+let autosaveTimer = null;
+let autosaveInterval = null;
+let lastAutosaveAt = 0;
+const AUTOSAVE_MIN_INTERVAL_MS = 15_000;
+const AUTOSAVE_FORCE_INTERVAL_MS = 60_000;
+const NON_DIRTY_COMMANDS = new Set([
+  "help",
+  "scripts",
+  "ls",
+  "downloads",
+  "inventory",
+  "channels",
+  "contacts",
+  "jobs",
+  "diagnose",
+]);
+
 function setCorruption(enabled) {
   const on = Boolean(enabled);
   if (on) state.flags.add("corruption");
   else state.flags.delete("corruption");
   document.body.classList.toggle("corrupt", state.flags.has("corruption"));
 }
+
+function markDirty() {
+  saveDirty = true;
+  scheduleAutosave();
+}
+
+function scheduleAutosave() {
+  if (!state.handle) return;
+  if (autosaveTimer) return;
+  autosaveTimer = window.setTimeout(() => {
+    autosaveTimer = null;
+    autoSaveNow();
+  }, 3000);
+}
+
+function autoSaveNow() {
+  if (!state.handle) return;
+  if (state.editor) return;
+  const now = Date.now();
+  const stale = now - lastAutosaveAt >= AUTOSAVE_FORCE_INTERVAL_MS;
+  if (!saveDirty && !stale) return;
+  if (now - lastAutosaveAt < AUTOSAVE_MIN_INTERVAL_MS) return;
+
+  saveState({ silent: true });
+  saveDirty = false;
+  lastAutosaveAt = now;
+}
+
+function ensureAutosaveLoop() {
+  if (autosaveInterval) return;
+  autosaveInterval = window.setInterval(() => autoSaveNow(), 5000);
+  window.addEventListener("beforeunload", () => {
+    try {
+      saveState({ silent: true });
+    } catch {}
+  });
+}
+
+function downloadTextFile(filename, text) {
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function exportSave() {
+  const payload = {
+    game: GAME_ID,
+    title: GAME_TITLE,
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    data: getSaveData(),
+  };
+  downloadTextFile(`${GAME_ID}-save.json`, JSON.stringify(payload, null, 2));
+  writeLine("Save exported.", "ok");
+}
+
+function importSaveObject(obj) {
+  if (!obj || typeof obj !== "object") {
+    writeLine("Import failed: invalid JSON.", "error");
+    return false;
+  }
+  const data = obj.data && typeof obj.data === "object" ? obj.data : obj;
+  if (!data || typeof data !== "object") {
+    writeLine("Import failed: missing data.", "error");
+    return false;
+  }
+  if (!data.handle) {
+    writeLine("Import failed: missing handle.", "error");
+    return false;
+  }
+  localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  loadState({ silent: true });
+  writeLine("Save imported and loaded.", "ok");
+  return true;
+}
+
+const importPicker =
+  typeof document !== "undefined"
+    ? (() => {
+        const el = document.createElement("input");
+        el.type = "file";
+        el.accept = "application/json";
+        el.style.display = "none";
+        el.addEventListener("change", async () => {
+          const file = el.files && el.files[0];
+          el.value = "";
+          if (!file) return;
+          try {
+            const text = await file.text();
+            const obj = JSON.parse(text);
+            importSaveObject(obj);
+          } catch (err) {
+            writeLine(
+              "Import failed: " + (err && err.message ? err.message : "invalid file"),
+              "error"
+            );
+          }
+        });
+        document.body.appendChild(el);
+        return el;
+      })()
+    : null;
 
 function writeLine(text, kind) {
   const line = document.createElement("div");
@@ -1327,6 +1453,7 @@ function completeActiveDownload() {
     writeLine(`download complete: ${active.file} -> kit.${entry.script.name}`, "ok");
     state.marks.add("mark.download");
   }
+  markDirty();
 
   // Keep tutorial/story reactive.
   storyChatTick();
@@ -2388,10 +2515,11 @@ function finishEditor(save) {
   state.userScripts[editor.name] = { owner: state.handle, name: editor.name, sec, code };
   writeLine(`Saved ${state.handle}.${editor.name} [${sec}]`, "ok");
   setMark("mark.edit");
+  markDirty();
 }
 
-function saveState() {
-  const data = {
+function getSaveData() {
+  return {
     handle: state.handle,
     loc: state.loc,
     gc: state.gc,
@@ -2421,8 +2549,15 @@ function saveState() {
     traceMax: state.traceMax,
     lastCipher: state.lastCipher,
   };
+}
+
+function saveState(options) {
+  const opts = options || {};
+  const data = getSaveData();
   localStorage.setItem(SAVE_KEY, JSON.stringify(data));
-  writeLine("State saved.", "ok");
+  saveDirty = false;
+  lastAutosaveAt = Date.now();
+  if (!opts.silent) writeLine("State saved.", "ok");
 }
 
 function loadState(options) {
@@ -2433,7 +2568,8 @@ function loadState(options) {
     if (!opts.silent) writeLine("No save found.", "warn");
     return false;
   }
-  const data = JSON.parse(raw);
+  const parsed = JSON.parse(raw);
+  const data = parsed && parsed.data && typeof parsed.data === "object" ? parsed.data : parsed;
   state.handle = data.handle;
   state.loc = data.loc || "home.hub";
   state.gc = data.gc ?? 0;
@@ -2484,6 +2620,7 @@ function loadState(options) {
   tutorialAdvance();
   // If we loaded from legacy key, persist in the new namespace.
   if (localStorage.getItem(SAVE_KEY) === null) localStorage.setItem(SAVE_KEY, JSON.stringify(JSON.parse(raw)));
+  saveDirty = false;
   return true;
 }
 
@@ -2636,6 +2773,9 @@ function handleCommand(inputText) {
     storyChatTick();
     tutorialPrint();
     updateHud();
+    ensureAutosaveLoop();
+    markDirty();
+    autoSaveNow();
     return;
   }
 
@@ -2721,7 +2861,7 @@ function handleCommand(inputText) {
           "  say <text> | join #chan | switch #chan | channels | tell <npc> <msg>",
           "  inventory | install <upgrade> | marks | jobs | turnin <mask|token>",
           "  diagnose | stabilize | corrupt",
-          "  save | load | reset | clear | restart --confirm",
+          "  save | load | export | import | reset | clear | restart --confirm",
           "",
           "Tips:",
           "  help call        (examples)",
@@ -2903,10 +3043,27 @@ function handleCommand(inputText) {
     case "load":
       loadState();
       break;
-    case "reset":
-      localStorage.removeItem(SAVE_KEY);
-      writeLine("Save cleared.", "warn");
+    case "export":
+      exportSave();
       break;
+    case "import": {
+      if (!args.length) {
+        if (!importPicker) {
+          writeLine("Import not available.", "warn");
+          break;
+        }
+        importPicker.click();
+        writeLine("Select a save JSON to import...", "dim");
+        break;
+      }
+      const payload = args.join(" ");
+      try {
+        importSaveObject(JSON.parse(payload));
+      } catch (err) {
+        writeLine("Import failed: invalid JSON.", "error");
+      }
+      break;
+    }
     case "clear":
       screen.innerHTML = "";
       break;
@@ -2961,6 +3118,9 @@ function handleCommand(inputText) {
       break;
   }
 
+  if (!NON_DIRTY_COMMANDS.has(cmd)) markDirty();
+  ensureAutosaveLoop();
+  autoSaveNow();
   tutorialAdvance();
   updateHud();
 }
@@ -3149,6 +3309,8 @@ function allCommandNames() {
     "tutorial",
     "save",
     "load",
+    "export",
+    "import",
     "reset",
     "clear",
     "exfiltrate",
@@ -3226,6 +3388,7 @@ function boot() {
   writeLine("driftshell // local drift sim", "header");
   hookUi();
   renderChat();
+  ensureAutosaveLoop();
   if (!loadState({ silent: true })) {
     writeLine("Enter a handle to begin.", "dim");
     writeLine("Tip: type `help` for examples, or `tutorial` to reprint steps.", "dim");
