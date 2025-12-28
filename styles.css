@@ -58,6 +58,35 @@ body {
   letter-spacing: 0.02em;
 }
 
+@keyframes corruptJitter {
+  0% { transform: translate3d(0,0,0); }
+  10% { transform: translate3d(0.2px,-0.2px,0); }
+  22% { transform: translate3d(-0.3px,0.2px,0); }
+  35% { transform: translate3d(0.3px,0.1px,0); }
+  60% { transform: translate3d(-0.2px,-0.1px,0); }
+  100% { transform: translate3d(0,0,0); }
+}
+
+body.corrupt {
+  filter: hue-rotate(12deg) saturate(1.15);
+}
+
+body.corrupt #shell {
+  animation: corruptJitter 6.5s infinite;
+}
+
+body.corrupt #shell::after {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  opacity: 0.12;
+  mix-blend-mode: screen;
+  background:
+    linear-gradient(90deg, rgba(255, 64, 64, 0.12), transparent 30%, rgba(64, 192, 255, 0.10)),
+    radial-gradient(circle at 75% 35%, rgba(255, 114, 60, 0.12), transparent 55%);
+}
+
 #app {
   height: 100vh;
   width: 100vw;

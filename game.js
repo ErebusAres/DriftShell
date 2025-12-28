@@ -1,10 +1,15 @@
 "use strict";
 
-// HackTerm: local, hackmud-inspired terminal sim (single-player, offline).
+// DriftShell: local, hackmud-inspired terminal sim (single-player, offline).
 // This is a lightweight homage: scripts are code you can edit and call,
 // security levels gate cross-script calls, and locs are breached via lock stacks.
 
-const SAVE_KEY = "hackterm_save_v1";
+const GAME_TITLE = "DriftShell";
+const GAME_ID = "driftshell";
+const LEGACY_SAVE_KEY = "hackterm_save_v1";
+const LEGACY_SCRATCH_KEY_PREFIX = "hackterm_scratch_v1:";
+
+const SAVE_KEY = `${GAME_ID}_save_v1`;
 const SEC_LEVELS = ["NULLSEC", "LOWSEC", "MIDSEC", "HIGHSEC", "FULLSEC"];
 const UPGRADE_DEFS = {
   "upg.trace_spool": {
@@ -41,6 +46,13 @@ const chatChannelLabel = document.getElementById("chat-channel");
 const scratchPad = document.getElementById("scratch-pad");
 const scratchClear = document.getElementById("scratch-clear");
 const quickLinks = document.getElementById("quick-links");
+
+function setCorruption(enabled) {
+  const on = Boolean(enabled);
+  if (on) state.flags.add("corruption");
+  else state.flags.delete("corruption");
+  document.body.classList.toggle("corrupt", state.flags.has("corruption"));
+}
 
 function writeLine(text, kind) {
   const line = document.createElement("div");
@@ -101,7 +113,7 @@ function renderChat() {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
-const SCRATCH_KEY_PREFIX = "hackterm_scratch_v1:";
+const SCRATCH_KEY_PREFIX = `${GAME_ID}_scratch_v1:`;
 let scratchSaveTimer = null;
 
 function scratchKey() {
@@ -111,8 +123,20 @@ function scratchKey() {
 
 function loadScratchFromStorage() {
   if (!scratchPad) return;
-  const raw = localStorage.getItem(scratchKey());
-  if (raw !== null) scratchPad.value = raw;
+  const key = scratchKey();
+  const raw = localStorage.getItem(key);
+  if (raw !== null) {
+    scratchPad.value = raw;
+    return;
+  }
+  // Migrate legacy scratch (pre-rename) once.
+  const handle = state.handle ? String(state.handle) : "default";
+  const legacyKey = LEGACY_SCRATCH_KEY_PREFIX + handle.toLowerCase();
+  const legacy = localStorage.getItem(legacyKey);
+  if (legacy !== null) {
+    scratchPad.value = legacy;
+    localStorage.setItem(key, legacy);
+  }
 }
 
 function saveScratchToStorage() {
@@ -393,6 +417,53 @@ function ensureDm(npcId) {
 function npcReply(npcId, body) {
   const msg = String(body || "").toLowerCase();
 
+  if (npcId === "switchboard") {
+    if (msg.includes("why") || msg.includes("drift") || msg.includes("what")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body:
+          "The Drift isn't a place. It's what happened when people taught systems to lie politely. We live in the leftover behavior.",
+      });
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body:
+          "Signals lead to locks, locks lead to stories. Keep notes. Write scripts to survive repetition.",
+      });
+      return;
+    }
+    if (msg.includes("hint") || msg.includes("lost")) {
+      const current = tutorialCurrent();
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body: current ? `Objective: ${current.title} — ${current.hint}` : "Type `tutorial` for objectives.",
+      });
+      return;
+    }
+    if (msg.includes("script")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body:
+          "Local scripts are JS. You get `ctx` and `args`. Example: `ctx.print(JSON.stringify(args))`.",
+      });
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body: "Try: `edit echo` then save with `:wq`, then `call <your_handle>.echo msg=\"hi\"`.",
+      });
+      return;
+    }
+    chatPost({
+      channel: dmChannel(npcId),
+      from: "switchboard",
+      body: "Ask `why`, ask for a `hint`, or ask about `scripts`.",
+    });
+    return;
+  }
+
   if (npcId === "juniper") {
     if (msg.includes("work")) {
       chatPost({
@@ -409,7 +480,7 @@ function npcReply(npcId, body) {
         chatPost({
           channel: dmChannel(npcId),
           from: "juniper",
-          body: "You don’t have the mask. Don’t waste my time.",
+          body: "You don't have the mask. Don't waste my time.",
         });
         return;
       }
@@ -429,6 +500,15 @@ function npcReply(npcId, body) {
         body: "Clean enough. +50GC. Tip: breach `archives.arc` once you’ve got the ember phrase.",
       });
       updateHud();
+      return;
+    }
+    if (msg.includes("locks")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "juniper",
+        body:
+          "Locks aren't doors, they're conversations. You don't guess— you collect. Files, phrases, habits. Then you answer like you meant it.",
+      });
       return;
     }
     chatPost({
@@ -456,6 +536,15 @@ function npcReply(npcId, body) {
       });
       return;
     }
+    if (msg.includes("drift") || msg.includes("archive")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "archivist",
+        body:
+          "The archive keeps what the Drift tries to forget. Every operator leaves fingerprints. Some catalog them. Some erase them.",
+      });
+      return;
+    }
     chatPost({
       channel: dmChannel(npcId),
       from: "archivist",
@@ -471,6 +560,15 @@ function npcReply(npcId, body) {
         from: "weaver",
         body:
           "Token recipe: badge.sig + mask.dat + weaver.mark. Run `call kit.splice` after you download it.",
+      });
+      return;
+    }
+    if (msg.includes("marks")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "weaver",
+        body:
+          "Marks are receipts. They prove you were somewhere without telling anyone how you got in. Some locks respect that.",
       });
       return;
     }
@@ -629,7 +727,7 @@ const LOCS = {
       "readme.txt": {
         type: "text",
         content: [
-          "HACKTERM//BOOTSTRAP",
+          "DRIFTSHELL//BOOTSTRAP",
           "This shell simulates a dead net for training and salvage.",
           "",
           "Core commands:",
@@ -678,6 +776,11 @@ const LOCS = {
           "Run tracer.s to map the edge. Spoof a mask with spoof.s.",
           "Sniffer pulses find hidden dens. Use sniffer.s.",
         ].join("\n"),
+      },
+      "cipher.txt": {
+        type: "text",
+        cipher: true,
+        content: "rzore vf gur qevsg",
       },
       "badge.sig": {
         type: "item",
@@ -764,7 +867,7 @@ const LOCS = {
       {
         prompt: "LOCK: respond with the ember phrase",
         answer: "EMBER IS THE DRIFT",
-        hint: "cipher.txt hints at rot13.",
+        hint: "Decode rot13: `rzore vf gur qevsg` (see cipher.txt at public.exchange).",
       },
     ],
     links: ["home.hub", "public.exchange", "archives.arc"],
@@ -1477,6 +1580,42 @@ const TUTORIAL_STEPS = [
       }),
   },
   {
+    id: "t_edit",
+    title: "Write Your First Script",
+    hint: "Run `edit hello`, paste `ctx.print('hello');`, then `:wq` to save.",
+    check: () => state.marks.has("mark.edit"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Write code. Save it. Then run it like any other script.",
+      }),
+  },
+  {
+    id: "t_user_run",
+    title: "Run Your Script",
+    hint: "Run `call <your_handle>.hello`.",
+    check: () => state.flags.has("ran_user_script"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Your scripts take `ctx` and `args`. Try `help call ?` when you’re ready.",
+      }),
+  },
+  {
+    id: "t_mask",
+    title: "Mint A Mask",
+    hint: "Run `download spoof.s`, then `call kit.spoof`.",
+    check: () => state.inventory.has("mask.dat"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "juniper",
+        body: "You want the archive? You'll need a mask. Pull `spoof.s` and run it.",
+      }),
+  },
+  {
     id: "t_badge",
     title: "Acquire Credentials",
     hint: "Run `download badge.sig`.",
@@ -1490,26 +1629,135 @@ const TUTORIAL_STEPS = [
   },
   {
     id: "t_gate",
-    title: "Breach The Gate",
-    hint: "Run `breach sable.gate`, then `unlock badge.sig`.",
-    check: () => state.unlocked.has("sable.gate"),
-    onStart: () =>
-      chatPost({
-        channel: "#kernel",
-        from: "switchboard",
-        body: "Gate time. `breach sable.gate`.",
-      }),
-  },
-  {
-    id: "t_decode",
     title: "Decode The Ember Phrase",
-    hint: "Run `cat cipher.txt`, then `decode rot13`.",
+    hint: "From the exchange: `connect public.exchange`, `cat cipher.txt`, then `decode rot13`.",
     check: () => state.flags.has("ember_phrase"),
     onStart: () =>
       chatPost({
         channel: "#kernel",
         from: "switchboard",
-        body: "Read the note. Decode it. Then we go deeper.",
+        body: "Read the rot13 note. Decode it. Then we go deeper.",
+      }),
+  },
+  {
+    id: "t_decode",
+    title: "Breach The Gate",
+    hint: "Run `breach sable.gate`, then `unlock badge.sig`, then `unlock EMBER IS THE DRIFT`.",
+    check: () => state.unlocked.has("sable.gate"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Gate time. `breach sable.gate` and answer both locks.",
+      }),
+  },
+  {
+    id: "t_archive",
+    title: "Breach The Archive",
+    hint: "Run `breach archives.arc`, then `unlock mask.dat`, then `connect archives.arc`.",
+    check: () => state.unlocked.has("archives.arc") && state.loc === "archives.arc",
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "The Sable Archive is next. Bring your mask and don't spike trace.",
+      }),
+  },
+  {
+    id: "t_b64",
+    title: "Pull The Lattice Sigil",
+    hint: "Run `cat key.b64`, then `decode b64`.",
+    check: () => state.flags.has("lattice_sigil"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "archivist",
+        body: "There is a sigil folded into base64. Read it clean.",
+      }),
+  },
+  {
+    id: "t_sniffer",
+    title: "Find The Weaver",
+    hint: "From exchange: `connect public.exchange`, `download sniffer.s`, then `call kit.sniffer`.",
+    check: () => state.flags.has("sniffer_run"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "You need a token. Sniffer will find the hands that still make them.",
+      }),
+  },
+  {
+    id: "t_weaver",
+    title: "Breach Weaver.Den",
+    hint: "Run `breach weaver.den`, then `unlock THREAD THE DRIFT`, then `connect weaver.den`.",
+    check: () => state.unlocked.has("weaver.den") && state.loc === "weaver.den",
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "weaver",
+        body: "Bring proof of thread. Read `weaver.log` if you forgot the phrase.",
+      }),
+  },
+  {
+    id: "t_token",
+    title: "Forge A Token",
+    hint: "Run `download weaver.mark`, `download splice.s`, then `call kit.splice`.",
+    check: () => state.inventory.has("token.key"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "weaver",
+        body: "Splice requires three pieces: badge.sig + mask.dat + weaver.mark.",
+      }),
+  },
+  {
+    id: "t_cache",
+    title: "Open Lattice.Cache",
+    hint: "Run `breach lattice.cache`, then `unlock SIGIL: LATTICE`, then `connect lattice.cache`.",
+    check: () => state.unlocked.has("lattice.cache") && state.loc === "lattice.cache",
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "trust",
+        body: "lattice.cache waiting :: token + mark verified",
+        kind: "trust",
+      }),
+  },
+  {
+    id: "t_audit",
+    title: "Steal The Shard",
+    hint: "Run `download ghost.s`, `call kit.ghost`, then `breach corp.audit` and `download relay.shard`.",
+    check: () => state.inventory.has("relay.shard"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "One last piece: a relay shard. Ghost your trail and hit corp.audit fast.",
+      }),
+  },
+  {
+    id: "t_relic",
+    title: "Reach The Core",
+    hint: "Run `download fork.s`, `call kit.fork`, then `connect core.relic`.",
+    check: () => state.loc === "core.relic",
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "archivist",
+        body: "Fork the relay. The core only shows itself to a split channel.",
+      }),
+  },
+  {
+    id: "t_choice",
+    title: "Make The Choice",
+    hint: "At core.relic: `cat core.log`, then choose `exfiltrate` or `restore`.",
+    check: () => state.flags.has("touched_relic"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Last step: decide what you are. Exfiltrate it, or restore it.",
       }),
   },
   {
@@ -1812,6 +2060,7 @@ function runUserScript(script, args) {
   try {
     const fn = new Function("ctx", "args", `"use strict";\n${script.code}`);
     fn(ctx, args);
+    state.flags.add("ran_user_script");
   } catch (err) {
     writeLine(`Script error: ${err.message}`, "error");
   }
@@ -1825,7 +2074,8 @@ function runScript(name, args, caller) {
   }
 
   const callerSec = caller ? caller.sec : "FULLSEC";
-  if (secRank(script.sec) < secRank(callerSec)) {
+  // In this sim: higher security can call lower security, but not vice-versa.
+  if (secRank(script.sec) > secRank(callerSec)) {
     writeLine(
       `SECURITY VIOLATION: ${callerSec} cannot call ${script.sec}`,
       "error"
@@ -1901,6 +2151,15 @@ function storyChatTick() {
       channel: "#kernel",
       from: "switchboard",
       body: "Good. Ember confirmed. Breach sable.gate and don't spike trace.",
+    });
+    return;
+  }
+  if (state.unlocked.has("sable.gate") && !state.flags.has("chat_gate_open")) {
+    state.flags.add("chat_gate_open");
+    chatPost({
+      channel: "#kernel",
+      from: "switchboard",
+      body: "Gate open. Next target is `archives.arc` (needs `mask.dat` + tracer signal).",
     });
     return;
   }
@@ -2168,7 +2427,8 @@ function saveState() {
 
 function loadState(options) {
   const opts = options || {};
-  const raw = localStorage.getItem(SAVE_KEY);
+  let raw = localStorage.getItem(SAVE_KEY);
+  if (!raw) raw = localStorage.getItem(LEGACY_SAVE_KEY);
   if (!raw) {
     if (!opts.silent) writeLine("No save found.", "warn");
     return false;
@@ -2187,8 +2447,10 @@ function loadState(options) {
   state.upgrades = new Set(data.upgrades || []);
   if (data.tutorial) {
     state.tutorial.enabled = data.tutorial.enabled !== false;
-    state.tutorial.stepIndex = data.tutorial.stepIndex || 0;
     state.tutorial.completed = new Set(data.tutorial.completed || []);
+    // Recompute current step from completion set so tutorial stays stable
+    // even if step ordering changes between versions.
+    state.tutorial.stepIndex = 0;
   }
   if (data.npcs) {
     state.npcs.known = new Set(data.npcs.known || ["switchboard"]);
@@ -2216,10 +2478,128 @@ function loadState(options) {
   }
   // scratchpad is user-authored; don't clear on load
   if (!opts.silent) writeLine("State loaded.", "ok");
+  document.body.classList.toggle("corrupt", state.flags.has("corruption"));
   showLoc();
   storyChatTick();
   tutorialAdvance();
+  // If we loaded from legacy key, persist in the new namespace.
+  if (localStorage.getItem(SAVE_KEY) === null) localStorage.setItem(SAVE_KEY, JSON.stringify(JSON.parse(raw)));
   return true;
+}
+
+function listJobs() {
+  writeLine("JOBS", "header");
+  const jobs = [];
+
+  if (npcKnown("juniper") && !state.flags.has("q_juniper_mask_done")) {
+    jobs.push({
+      id: "mask",
+      npc: "juniper",
+      title: "Mask Run",
+      status: state.inventory.has("mask.dat") ? "[READY]" : "[ACTIVE]",
+      detail:
+        "Mint `mask.dat` (download spoof.s; call kit.spoof) then `turnin mask` at public.exchange (+50GC).",
+    });
+  }
+
+  if (npcKnown("weaver") && state.inventory.has("token.key") && !state.flags.has("q_weaver_token_done")) {
+    jobs.push({
+      id: "token",
+      npc: "weaver",
+      title: "Token Proof",
+      status: "[READY]",
+      detail: "Bring `token.key` to weaver.den and `turnin token` (+upg.trace_spool).",
+    });
+  }
+
+  if (!jobs.length) {
+    writeLine("(none)", "dim");
+    writeLine("Tip: NPCs offer contracts in DMs. Try `tell juniper work`.", "dim");
+    return;
+  }
+
+  jobs.forEach((j) => {
+    writeLine(`${j.status} ${j.npc} :: ${j.title}`, "dim");
+    writeLine(`  id: ${j.id}`, "dim");
+    writeLine(`  ${j.detail}`, "dim");
+  });
+}
+
+function turnIn(what) {
+  const id = String(what || "").toLowerCase().trim();
+  if (!id) {
+    writeLine("Usage: turnin <mask|token>", "warn");
+    return;
+  }
+
+  if (id === "mask") {
+    if (state.loc !== "public.exchange") {
+      writeLine("Turn-in requires `connect public.exchange`.", "warn");
+      return;
+    }
+    if (!state.inventory.has("mask.dat")) {
+      writeLine("Missing item: mask.dat", "warn");
+      return;
+    }
+    if (state.flags.has("q_juniper_mask_done")) {
+      writeLine("Already turned in.", "dim");
+      return;
+    }
+    state.flags.add("q_juniper_mask_done");
+    state.gc += 50;
+    writeLine("Turn-in accepted. +50GC", "ok");
+    chatPost({ channel: dmChannel("juniper"), from: "juniper", body: "Clean enough. +50GC." });
+    updateHud();
+    return;
+  }
+
+  if (id === "token") {
+    if (state.loc !== "weaver.den") {
+      writeLine("Turn-in requires `connect weaver.den`.", "warn");
+      return;
+    }
+    if (!state.inventory.has("token.key")) {
+      writeLine("Missing item: token.key", "warn");
+      return;
+    }
+    if (state.flags.has("q_weaver_token_done")) {
+      writeLine("Already turned in.", "dim");
+      return;
+    }
+    state.flags.add("q_weaver_token_done");
+    state.inventory.add("upg.trace_spool");
+    writeLine("Turn-in accepted. Received: upg.trace_spool", "ok");
+    writeLine("Tip: `install upg.trace_spool`", "dim");
+    chatPost({
+      channel: dmChannel("weaver"),
+      from: "weaver",
+      body: "Proof accepted. Take a spool. It buys you mistakes.",
+    });
+    return;
+  }
+
+  writeLine("Unknown turn-in. Try: `turnin mask` or `turnin token`.", "warn");
+}
+
+function diagnoseProgress() {
+  writeLine("DIAGNOSE", "header");
+  const discovered = Array.from(state.discovered).sort();
+  const locked = discovered.filter((l) => !state.unlocked.has(l));
+  if (!locked.length) {
+    writeLine("No discovered locs are locked.", "dim");
+  } else {
+    locked.forEach((locName) => {
+      const loc = getLoc(locName);
+      const req = canAttemptLoc(locName);
+      const need = [];
+      if (req.missingItems.length) need.push("items: " + req.missingItems.join(", "));
+      if (req.missingFlags.length) need.push("signals: " + req.missingFlags.join(", "));
+      writeLine(`${locName} :: LOCKED`, "warn");
+      if (need.length) writeLine("  pre-check missing " + need.join(" | "), "dim");
+      if (loc && loc.locks && loc.locks.length) writeLine("  first lock: " + loc.locks[0].prompt, "dim");
+    });
+  }
+  writeLine("Tip: `tutorial` shows the recommended path.", "dim");
 }
 
 function handleCommand(inputText) {
@@ -2339,7 +2719,8 @@ function handleCommand(inputText) {
           "  ls | cat <file> | download <file|glob> | downloads",
           "  scripts | call <script> [args] | edit <name> | decode rot13|b64 [text]",
           "  say <text> | join #chan | switch #chan | channels | tell <npc> <msg>",
-          "  inventory | install <upgrade> | marks",
+          "  inventory | install <upgrade> | marks | jobs | turnin <mask|token>",
+          "  diagnose | stabilize | corrupt",
           "  save | load | reset | clear | restart --confirm",
           "",
           "Tips:",
@@ -2423,6 +2804,23 @@ function handleCommand(inputText) {
       break;
     case "inventory":
       listInventory();
+      break;
+    case "jobs":
+      listJobs();
+      break;
+    case "turnin":
+      turnIn(args[0]);
+      break;
+    case "diagnose":
+      diagnoseProgress();
+      break;
+    case "stabilize":
+      setCorruption(false);
+      writeLine("Signal stabilized.", "ok");
+      break;
+    case "corrupt":
+      setCorruption(true);
+      writeLine("Signal corruption enabled.", "warn");
       break;
     case "decode": {
       const type = (args[0] || "").toLowerCase();
@@ -2518,6 +2916,8 @@ function handleCommand(inputText) {
         break;
       }
       state.flags.add("touched_relic");
+      setCorruption(true);
+      writeLine("SIGNAL CORRUPTION DETECTED. Type `stabilize` to clear.", "warn");
       discover(["echo.after"]);
       state.unlocked.add("echo.after");
       chatPost({
@@ -2539,6 +2939,8 @@ function handleCommand(inputText) {
         break;
       }
       state.flags.add("touched_relic");
+      setCorruption(true);
+      writeLine("SIGNAL CORRUPTION DETECTED. Type `stabilize` to clear.", "warn");
       discover(["echo.after"]);
       state.unlocked.add("echo.after");
       chatPost({
@@ -2731,6 +3133,9 @@ function allCommandNames() {
     "download",
     "downloads",
     "inventory",
+    "jobs",
+    "turnin",
+    "diagnose",
     "decode",
     "marks",
     "say",
@@ -2748,6 +3153,8 @@ function allCommandNames() {
     "clear",
     "exfiltrate",
     "restore",
+    "stabilize",
+    "corrupt",
     "restart",
   ];
 }
@@ -2816,7 +3223,7 @@ function completeInput() {
 }
 
 function boot() {
-  writeLine("hackterm // local drift sim", "header");
+  writeLine("driftshell // local drift sim", "header");
   hookUi();
   renderChat();
   if (!loadState({ silent: true })) {

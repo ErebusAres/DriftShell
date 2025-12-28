@@ -1,6 +1,6 @@
-# HackTerm
+# DriftShell
 
-A local, single-player game inspired by hackmud’s terminal aesthetic and script-driven mechanics.
+A local, single-player game inspired by hackmud's terminal aesthetic and script-driven mechanics.
 
 ## Play (recommended: web UI)
 
@@ -26,4 +26,4 @@ Then open `http://localhost:8080/`.
 
 ## Legacy (Python version)
 
-`hackterm_game.py` is an older CLI prototype. The web UI is the current direction for hackmud-like visualization.
+The old Python CLI prototype has been removed; the web UI is the current direction for hackmud-like visualization.
