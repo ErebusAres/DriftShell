@@ -67,15 +67,18 @@ body {
   100% { transform: translate3d(0,0,0); }
 }
 
-body.corrupt {
+body.corrupt,
+body.corrupt1 {
   filter: hue-rotate(12deg) saturate(1.15);
 }
 
-body.corrupt #shell {
+body.corrupt #shell,
+body.corrupt1 #shell {
   animation: corruptJitter 6.5s infinite;
 }
 
-body.corrupt #shell::after {
+body.corrupt #shell::after,
+body.corrupt1 #shell::after {
   content: "";
   pointer-events: none;
   position: absolute;
@@ -85,6 +88,30 @@ body.corrupt #shell::after {
   background:
     linear-gradient(90deg, rgba(255, 64, 64, 0.12), transparent 30%, rgba(64, 192, 255, 0.10)),
     radial-gradient(circle at 75% 35%, rgba(255, 114, 60, 0.12), transparent 55%);
+}
+
+body.corrupt2 {
+  filter: hue-rotate(18deg) saturate(1.25) contrast(1.05);
+}
+
+body.corrupt2 #shell {
+  animation: corruptJitter 3.8s infinite;
+}
+
+body.corrupt2 #shell::after {
+  opacity: 0.18;
+}
+
+body.corrupt3 {
+  filter: hue-rotate(24deg) saturate(1.35) contrast(1.12);
+}
+
+body.corrupt3 #shell {
+  animation: corruptJitter 2.4s infinite;
+}
+
+body.corrupt3 #shell::after {
+  opacity: 0.26;
 }
 
 #app {
@@ -431,6 +458,17 @@ section {
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.chat-dm-dir {
+  display: inline-block;
+  min-width: 2.4ch;
+  text-align: right;
+  letter-spacing: 0.12em;
+}
+
+.chat-dm-tag {
+  letter-spacing: 0.06em;
 }
 
 #chat-input-row {

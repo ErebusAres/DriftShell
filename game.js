@@ -11,6 +11,8 @@ const LEGACY_SCRATCH_KEY_PREFIX = "hackterm_scratch_v1:";
 
 const SAVE_KEY = `${GAME_ID}_save_v1`;
 const SEC_LEVELS = ["NULLSEC", "LOWSEC", "MIDSEC", "HIGHSEC", "FULLSEC"];
+const PRIMER_PAYLOAD = "DRIFTLOCAL::SEED=7|11|23|5|13|2";
+const WARDEN_PAYLOAD = "WARDEN::PHASE=1|KEY=RELIC|TRACE=4";
 const UPGRADE_DEFS = {
   "upg.trace_spool": {
     name: "trace_spool",
@@ -31,6 +33,25 @@ const UPGRADE_DEFS = {
 function secRank(level) {
   const idx = SEC_LEVELS.indexOf(level);
   return idx === -1 ? 0 : idx;
+}
+
+function checksumUtf8Mod4096(text) {
+  const bytes = new TextEncoder().encode(String(text || ""));
+  let sum = 0;
+  bytes.forEach((b) => {
+    sum += b;
+  });
+  return sum % 4096;
+}
+
+function hex3(n) {
+  const v = Math.max(0, Math.min(4095, Number(n) || 0));
+  return v.toString(16).toUpperCase().padStart(3, "0");
+}
+
+function expectedForChecksumPayload(payload) {
+  const handle = state.handle ? String(state.handle) : "ghost";
+  return hex3(checksumUtf8Mod4096(`${payload}|HANDLE=${handle}`));
 }
 
 const screen = document.getElementById("screen");
@@ -66,10 +87,34 @@ const NON_DIRTY_COMMANDS = new Set([
 ]);
 
 function setCorruption(enabled) {
-  const on = Boolean(enabled);
-  if (on) state.flags.add("corruption");
-  else state.flags.delete("corruption");
-  document.body.classList.toggle("corrupt", state.flags.has("corruption"));
+  setCorruptionLevel(enabled ? 1 : 0);
+}
+
+function corruptionLevel() {
+  if (state.flags.has("corrupt3")) return 3;
+  if (state.flags.has("corrupt2")) return 2;
+  if (state.flags.has("corrupt1") || state.flags.has("corruption")) return 1;
+  return 0;
+}
+
+function applyCorruptionClasses() {
+  const level = corruptionLevel();
+  document.body.classList.toggle("corrupt", level > 0);
+  document.body.classList.toggle("corrupt1", level === 1);
+  document.body.classList.toggle("corrupt2", level === 2);
+  document.body.classList.toggle("corrupt3", level === 3);
+}
+
+function setCorruptionLevel(level) {
+  const n = Math.max(0, Math.min(3, Number(level) || 0));
+  state.flags.delete("corruption");
+  state.flags.delete("corrupt1");
+  state.flags.delete("corrupt2");
+  state.flags.delete("corrupt3");
+  if (n >= 1) state.flags.add("corrupt1");
+  if (n >= 2) state.flags.add("corrupt2");
+  if (n >= 3) state.flags.add("corrupt3");
+  applyCorruptionClasses();
 }
 
 function markDirty() {
@@ -202,9 +247,11 @@ function renderChat() {
   if (!chatLog) return;
   chatLog.innerHTML = "";
   if (chatChannelLabel) chatChannelLabel.textContent = state.chat.channel;
-  const messages = state.chat.log.filter(
-    (m) => !m.channel || m.channel === state.chat.channel
-  );
+  const messages = state.chat.log.filter((m) => {
+    const channel = m.channel || state.chat.channel;
+    if (String(channel).startsWith("@")) return true; // DMs are always shown inline
+    return channel === state.chat.channel;
+  });
   messages.forEach((m) => {
     const row = document.createElement("div");
     row.className = "chat-msg";
@@ -213,18 +260,33 @@ function renderChat() {
     time.className = "chat-time";
     time.textContent = chatTime(m.t);
 
-    const colorClass =
-      m.kind === "trust" ? "trust" : m.color || userColorClass(m.from);
+    const colorClass = m.kind === "system" ? "dim" : m.color || userColorClass(m.from);
     const uidText = document.createElement("span");
     uidText.className = "uid-text";
-    uidText.textContent = String(m.uid || (m.kind === "trust" ? "0000" : userId4(m.from)));
+    uidText.textContent = String(m.uid || (m.kind === "system" ? "----" : userId4(m.from)));
 
     const body = document.createElement("span");
     body.className = "chat-body";
+
+    const channel = String(m.channel || state.chat.channel);
+    if (channel.startsWith("@")) {
+      const dir = document.createElement("span");
+      dir.className = "chat-dm-dir dim";
+      dir.textContent = m.from === state.handle ? ">>" : "<<";
+      body.appendChild(dir);
+      body.appendChild(document.createTextNode(" "));
+
+      const tag = document.createElement("span");
+      tag.className = "chat-dm-tag tok magenta";
+      tag.textContent = channel;
+      body.appendChild(tag);
+      body.appendChild(document.createTextNode(" "));
+    }
+
     const nameSpan = document.createElement("span");
     nameSpan.className =
-      "chat-name " + (m.kind === "trust" ? "tok trust" : colorClass);
-    nameSpan.textContent = m.from;
+      "chat-name " + (m.kind === "system" ? "dim" : colorClass);
+    nameSpan.textContent = m.kind === "system" ? "sys" : m.from;
     body.appendChild(nameSpan);
     body.appendChild(document.createTextNode(" :: "));
     const msgSpan = document.createElement("span");
@@ -459,35 +521,32 @@ function chatPost({ channel, from, body, kind }) {
     from: resolvedFrom,
     body: String(body || ""),
     kind: resolvedKind,
-    color: resolvedKind === "trust" ? null : userColorClass(resolvedFrom),
-    uid: resolvedKind === "trust" ? "0000" : userId4(resolvedFrom),
+    color: resolvedKind === "system" ? null : userColorClass(resolvedFrom),
+    uid: resolvedKind === "system" ? "----" : userId4(resolvedFrom),
   });
   renderChat();
 }
 
 function chatSystem(body) {
-  chatPost({ from: "trust", body, kind: "trust" });
+  chatPost({ from: "sys", body, kind: "system" });
 }
 
 function chatJoin(channel) {
   if (!channel.startsWith("#") && !channel.startsWith("@")) channel = "#" + channel;
+  // Joining wipes the current channel buffer (IRC-style) but preserves DMs.
+  state.chat.log = state.chat.log.filter((m) => String(m.channel || "").startsWith("@"));
   state.chat.channels.add(channel);
   state.chat.channel = channel;
-  chatSystem("joined " + channel);
+  chatSystem("joined " + channel + " (buffer cleared)");
 }
 
 function chatSwitch(channel) {
-  if (!channel.startsWith("#") && !channel.startsWith("@")) channel = "#" + channel;
-  if (!state.chat.channels.has(channel)) {
-    chatSystem("unknown channel (join it first): " + channel);
-    return;
-  }
-  state.chat.channel = channel;
-  renderChat();
+  // Single-channel view; switch behaves like join.
+  chatJoin(channel);
 }
 
 function chatHelp() {
-  chatSystem("chat commands: /help, /join #chan, /switch #chan, /channels");
+  chatSystem("chat commands: /help, /join #chan, /switch #chan, /channels, /tell <npc> <msg>");
 }
 
 const NPCS = {
@@ -495,7 +554,7 @@ const NPCS = {
     id: "switchboard",
     display: "switchboard",
     intro:
-      "I route you. I don’t save you. Type `tutorial` if you’re lost, or `help` for examples.",
+      "I route you. I don't save you. Type `tutorial` to pull the route overlay, or `help` for examples.",
   },
   juniper: {
     id: "juniper",
@@ -535,8 +594,6 @@ function dmChannel(npcId) {
 function ensureDm(npcId) {
   const chan = dmChannel(npcId);
   state.chat.channels.add(chan);
-  state.chat.channel = chan;
-  renderChat();
   if (!npcKnown(npcId)) npcIntroduce(npcId);
 }
 
@@ -544,6 +601,24 @@ function npcReply(npcId, body) {
   const msg = String(body || "").toLowerCase();
 
   if (npcId === "switchboard") {
+    if (msg.includes("checksum") || msg.includes("primer")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body:
+          "Checksums are habits. Read the payload, append your handle, compute. In scripts: `ctx.util.checksum(text)` then `ctx.util.hex3(n)`.",
+      });
+      return;
+    }
+    if (msg.includes("warden")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body:
+          "The Warden isn't security. It's a reflex. It punishes hesitation. Precompute what you can before you breach.",
+      });
+      return;
+    }
     if (msg.includes("why") || msg.includes("drift") || msg.includes("what")) {
       chatPost({
         channel: dmChannel(npcId),
@@ -564,7 +639,7 @@ function npcReply(npcId, body) {
       chatPost({
         channel: dmChannel(npcId),
         from: "switchboard",
-        body: current ? `Objective: ${current.title} — ${current.hint}` : "Type `tutorial` for objectives.",
+        body: current ? `Route: ${current.title} - ${current.hint}` : "Type `tutorial` to pull the route overlay.",
       });
       return;
     }
@@ -633,7 +708,15 @@ function npcReply(npcId, body) {
         channel: dmChannel(npcId),
         from: "juniper",
         body:
-          "Locks aren't doors, they're conversations. You don't guess— you collect. Files, phrases, habits. Then you answer like you meant it.",
+          "Locks aren't doors, they're conversations. You don't guess-you collect. Files, phrases, habits. Then you answer like you meant it.",
+      });
+      return;
+    }
+    if (msg.includes("pier")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "juniper",
+        body: "A pier on a dead net? Cute. If you see a clean edge, it's bait. Still-bait can pay.",
       });
       return;
     }
@@ -671,6 +754,15 @@ function npcReply(npcId, body) {
       });
       return;
     }
+    if (msg.includes("warden") || msg.includes("relic")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "archivist",
+        body:
+          "The Warden is a lie the net tells itself so it can sleep. If you wake the relic, you'll inherit the lie-or break it.",
+      });
+      return;
+    }
     chatPost({
       channel: dmChannel(npcId),
       from: "archivist",
@@ -695,6 +787,15 @@ function npcReply(npcId, body) {
         from: "weaver",
         body:
           "Marks are receipts. They prove you were somewhere without telling anyone how you got in. Some locks respect that.",
+      });
+      return;
+    }
+    if (msg.includes("slipper") || msg.includes("seam") || msg.includes("hole")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "weaver",
+        body:
+          "Seams are where the Drift forgets to pretend. If you found one, don't brag. Stitch it shut-or crawl through quietly.",
       });
       return;
     }
@@ -797,7 +898,7 @@ const state = {
   handle: null,
   loc: "home.hub",
   gc: 420,
-  discovered: new Set(["home.hub", "public.exchange", "sable.gate"]),
+  discovered: new Set(["home.hub", "training.node", "public.exchange", "sable.gate"]),
   unlocked: new Set(["home.hub", "public.exchange"]),
   inventory: new Set(),
   kit: {},
@@ -815,7 +916,7 @@ const state = {
   chat: {
     channel: "#kernel",
     channels: new Set(["#kernel"]),
-    log: [{ t: Date.now(), from: "trust", body: "chats online", kind: "trust" }],
+    log: [],
   },
   confirm: null,
   tutorial: {
@@ -848,7 +949,7 @@ const LOCS = {
     ],
     requirements: {},
     locks: [],
-    links: ["public.exchange", "sable.gate"],
+    links: ["training.node", "public.exchange", "sable.gate"],
     files: {
       "readme.txt": {
         type: "text",
@@ -867,6 +968,40 @@ const LOCS = {
           "  decode rot13|b64         decode the last cipher file",
           "  inventory                list items and kit",
           "  save / load              save or load",
+          "  export / import          move saves between browsers",
+        ].join("\n"),
+      },
+      "primer.dat": {
+        type: "text",
+        content: [
+          "PRIMER.DAT",
+          "",
+          "You want to feel like a hacker? Stop guessing.",
+          "Collect. Compute. Answer.",
+          "",
+          "ALGO: checksum(text) = (sum of UTF-8 bytes) % 4096",
+          "Format as 3-hex (uppercase). Example: 00A, 8EB, FFF",
+          "",
+          "payload=" + PRIMER_PAYLOAD,
+          "text = payload + '|HANDLE=<your_handle>'",
+          "",
+          "Target: training.node lock expects checksum(text).",
+        ].join("\n"),
+      },
+      "chk.example": {
+        type: "text",
+        content: [
+          "CHK.EXAMPLE",
+          "Paste this into `edit chk` and save with `:wq`.",
+          "",
+          "const primer = ctx.read('primer.dat') || '';",
+          "const payloadLine = (primer.split('\\n').find(l => l.startsWith('payload=')) || '');",
+          "const payload = payloadLine.replace('payload=','').trim();",
+          "if (!payload) { ctx.print('no payload'); return; }",
+          "const text = payload + '|HANDLE=' + ctx.handle();",
+          "const sum = ctx.util.checksum(text);",
+          "const out = ctx.util.hex3(sum);",
+          "ctx.print(out);",
         ].join("\n"),
       },
       "message.txt": {
@@ -880,6 +1015,49 @@ const LOCS = {
           "leave the net or stay buried.",
           "",
           "Start by running scripts.trust.scan, then pull a kit script.",
+        ].join("\n"),
+      },
+      "pier.note": {
+        type: "text",
+        content: [
+          "PIER.NOTE",
+          "",
+          "If the Drift ever offers you a pier, it's not offering you water.",
+          "It's offering you an edge where rules fall off.",
+          "",
+          "Code phrase: PIER//OPEN",
+        ].join("\n"),
+      },
+    },
+  },
+  "training.node": {
+    title: "LAB/TRAINING",
+    desc: [
+      "A sandboxed node with a single purpose: teach you to compute.",
+      "No prize. Just competence.",
+    ],
+    requirements: {},
+    locks: [
+      {
+        prompt: "LOCK: provide primer checksum (hex3)",
+        answer: () => expectedForChecksumPayload(PRIMER_PAYLOAD),
+        hint: "Read primer.dat at home.hub. Answer is checksum(payload|HANDLE=<your_handle>).",
+      },
+    ],
+    links: ["home.hub"],
+    files: {
+      "lab.log": {
+        type: "text",
+        content: [
+          "LAB LOG",
+          "If you cleared this, you're ready to leave the lab.",
+          "Next: connect public.exchange, pull tools, breach gates.",
+          "",
+          "Tip: write helper scripts. Example:",
+          "  edit chk",
+          "  ctx.read('primer.dat')",
+          "  compute the checksum",
+          "  ctx.print(result)",
         ].join("\n"),
       },
     },
@@ -926,7 +1104,7 @@ const LOCS = {
             "// @sec FULLSEC",
             "ctx.print('Tracer online. Mesh resolving...');",
             "ctx.flag('trace_open');",
-            "ctx.discover(['archives.arc']);",
+            "ctx.discover(['archives.arc','pier.gate']);",
           ].join("\n"),
         },
         content: [
@@ -975,6 +1153,60 @@ const LOCS = {
           "  // Sweep the quiet bands for hidden signals.",
           "}",
         ].join("\n"),
+      },
+    },
+  },
+  "pier.gate": {
+    title: "EMBER.PIER//GATE",
+    desc: [
+      "A thin gate on the edge of the mesh.",
+      "It doesn't look locked so much as unwilling.",
+    ],
+    requirements: { flags: ["trace_open"] },
+    locks: [
+      {
+        prompt: "LOCK: pier phrase",
+        answer: "PIER//OPEN",
+        hint: "Read pier.note at home.hub.",
+      },
+    ],
+    links: ["public.exchange"],
+    files: {
+      "edge.log": {
+        type: "text",
+        content: [
+          "EDGE LOG",
+          "Somewhere out there is a pier the old operators used to watch the Drift breathe.",
+          "If you're reading this, you're about to.",
+        ].join("\n"),
+      },
+    },
+  },
+  "ember.pier": {
+    title: "EMBER.PIER",
+    desc: [
+      "A dock made of dead protocols and glowing headers.",
+      "The Drift laps at your feet like a hungry dog that learned your name.",
+    ],
+    requirements: { flags: ["trace_open"], items: ["badge.sig"] },
+    locks: [],
+    links: ["pier.gate", "sable.gate"],
+    files: {
+      "pier.log": {
+        type: "text",
+        content: [
+          "EMBER PIER",
+          "You watch the Drift compile itself in real time.",
+          "Packets that should be local drift past like weather.",
+          "",
+          "Somebody tagged the pier with a warning:",
+          "  'Don't look for meaning. You'll find it anyway.'",
+        ].join("\n"),
+      },
+      "pier.b64": {
+        type: "text",
+        cipher: true,
+        content: "QUNUIEkgRkVFTDogWU9VJ1JFIEEgSEFDS0VS",
       },
     },
   },
@@ -1185,6 +1417,25 @@ const LOCS = {
           "The relic key rests inside.",
         ].join("\n"),
       },
+      "warden.dat": {
+        type: "text",
+        content: [
+          "WARDEN.DAT",
+          "",
+          "If you made it here, you're deep enough to attract attention.",
+          "The Drift is noticing you back.",
+          "",
+          "ALGO: checksum(text) = (sum of UTF-8 bytes) % 4096, hex3 uppercase",
+          "",
+          "payload=" + WARDEN_PAYLOAD,
+          "text = payload + '|HANDLE=<your_handle>'",
+        ].join("\n"),
+      },
+      "warden.b64": {
+        type: "text",
+        cipher: true,
+        content: "S0VFUCBUSEUgUkVMSUMgU0xFRVBJTkc=",
+      },
       "relic.key": {
         type: "item",
         item: "relic.key",
@@ -1199,7 +1450,23 @@ const LOCS = {
       "You can feel the drift pull at the edges.",
     ],
     requirements: { items: ["relay.shard", "relic.key"], flags: ["forked"] },
-    locks: [],
+    locks: [
+      {
+        prompt: "WARDEN: checksum required (hex3)",
+        answer: () => expectedForChecksumPayload(WARDEN_PAYLOAD),
+        hint: "Compute from warden.dat at lattice.cache: checksum(payload|HANDLE=<your_handle>) -> hex3.",
+      },
+      {
+        prompt: "WARDEN: recite the vow",
+        answer: "KEEP THE RELIC SLEEPING",
+        hint: "Decode warden.b64 at lattice.cache.",
+      },
+      {
+        prompt: "WARDEN: confirm fork state",
+        answer: "FORKED",
+        hint: "You only get here by forking. Say it.",
+      },
+    ],
     links: ["lattice.cache"],
     files: {
       "core.log": {
@@ -1265,12 +1532,49 @@ const LOCS = {
           "If you restored it, you still altered the drift.",
         ].join("\n"),
       },
+      "after_echo.txt": {
+        type: "text",
+        content: [
+          "AFTER.ECHO",
+          "You did it. The Warden screamed in machine-time, then fell silent.",
+          "",
+          "Victory doesn't feel like fireworks here.",
+          "It feels like a room finally letting you breathe.",
+          "",
+          "But the Drift remembers operators by the shapes they leave behind.",
+          "If you missed something, it will keep humming until you return.",
+        ].join("\n"),
+      },
       "spool.upg": {
         type: "upgrade",
         item: "upg.trace_spool",
         content: ["UPGRADE: TRACE_SPOOL", "Coils that widen your trace budget."].join(
           "\n"
         ),
+      },
+    },
+  },
+  "victory.hall": {
+    title: "VICTORY.HALL",
+    desc: [
+      "A clean room that shouldn't exist in a corrupted net.",
+      "Somebody built it as a promise: you can win and still be human.",
+    ],
+    requirements: { flags: ["touched_relic"] },
+    locks: [],
+    links: ["home.hub", "echo.after"],
+    files: {
+      "victory.log": {
+        type: "text",
+        content: [
+          "VICTORY LOG",
+          "You are standing in the afterimage of your own choices.",
+          "Juniper would sell this moment for 50GC.",
+          "Archivist would seal it in glass.",
+          "Weaver would stitch it into a mark and call it proof.",
+          "",
+          "If you found the Slipper seam, you know: this isn't over.",
+        ].join("\n"),
       },
     },
   },
@@ -1556,6 +1860,7 @@ function readFile(name) {
     return;
   }
   writeBlock(entry.content, "dim");
+  if (String(name || "").toLowerCase() === "primer.dat") state.flags.add("read_primer");
   if (entry.cipher) {
     state.lastCipher = entry.content;
   }
@@ -1646,7 +1951,7 @@ function resetToFreshState(keepChat) {
   state.handle = null;
   state.loc = "home.hub";
   state.gc = 420;
-  state.discovered = new Set(["home.hub", "public.exchange", "sable.gate"]);
+  state.discovered = new Set(["home.hub", "training.node", "public.exchange", "sable.gate"]);
   state.unlocked = new Set(["home.hub", "public.exchange"]);
   state.inventory = new Set();
   state.kit = {};
@@ -1668,7 +1973,7 @@ function resetToFreshState(keepChat) {
   state.chat = priorChat || {
     channel: "#kernel",
     channels: new Set(["#kernel"]),
-    log: [{ t: Date.now(), from: "trust", body: "chats online", kind: "trust" }],
+    log: [],
   };
   renderChat();
   if (scratchPad) scratchPad.value = "";
@@ -1694,6 +1999,55 @@ const TUTORIAL_STEPS = [
         channel: "#kernel",
         from: "switchboard",
         body: "First rule: never walk blind. Run `scan`.",
+      }),
+  },
+  {
+    id: "t_primer",
+    title: "Read The Primer",
+    hint: "Run `cat primer.dat` at home.hub.",
+    check: () => state.flags.has("read_primer"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Training first: read `primer.dat` at home.hub. The Drift respects operators who compute.",
+      }),
+  },
+  {
+    id: "t_edit",
+    title: "Write Your First Script",
+    hint: "Run `edit chk`, paste a checksum helper, then `:wq` to save.",
+    check: () => state.marks.has("mark.edit"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body:
+          "Write a helper script named `chk`. Use `ctx.read('primer.dat')` to get the payload, compute checksum, then `ctx.print(hex)`.",
+      }),
+  },
+  {
+    id: "t_user_run",
+    title: "Run Your Script",
+    hint: "Run `call <your_handle>.chk`.",
+    check: () => state.flags.has("ran_user_script"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Your scripts take `ctx` and `args`. Try `help call ?` when you’re ready.",
+      }),
+  },
+  {
+    id: "t_training",
+    title: "Open The Training Node",
+    hint: "Run `breach training.node`, then `unlock <hex3>`, then `connect training.node`.",
+    check: () => state.unlocked.has("training.node") && state.loc === "training.node",
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Use your checksum output to open `training.node`. No guessing.",
       }),
   },
   {
@@ -1730,30 +2084,6 @@ const TUTORIAL_STEPS = [
         channel: "#kernel",
         from: "switchboard",
         body: "Run it: `call kit.tracer`.",
-      }),
-  },
-  {
-    id: "t_edit",
-    title: "Write Your First Script",
-    hint: "Run `edit hello`, paste `ctx.print('hello');`, then `:wq` to save.",
-    check: () => state.marks.has("mark.edit"),
-    onStart: () =>
-      chatPost({
-        channel: "#kernel",
-        from: "switchboard",
-        body: "Write code. Save it. Then run it like any other script.",
-      }),
-  },
-  {
-    id: "t_user_run",
-    title: "Run Your Script",
-    hint: "Run `call <your_handle>.hello`.",
-    check: () => state.flags.has("ran_user_script"),
-    onStart: () =>
-      chatPost({
-        channel: "#kernel",
-        from: "switchboard",
-        body: "Your scripts take `ctx` and `args`. Try `help call ?` when you’re ready.",
       }),
   },
   {
@@ -1892,13 +2222,13 @@ const TUTORIAL_STEPS = [
   {
     id: "t_relic",
     title: "Reach The Core",
-    hint: "Run `download fork.s`, `call kit.fork`, then `connect core.relic`.",
+    hint: "From lattice.cache: `cat warden.dat`, compute checksum, `decode b64 warden.b64`, then `breach core.relic`.",
     check: () => state.loc === "core.relic",
     onStart: () =>
       chatPost({
         channel: "#kernel",
         from: "archivist",
-        body: "Fork the relay. The core only shows itself to a split channel.",
+        body: "The Warden will press you. Compute your checksum before you breach the core.",
       }),
   },
   {
@@ -1969,7 +2299,7 @@ function tutorialPrint() {
 }
 
 function tutorialStatus() {
-  writeLine("TUTORIAL", "header");
+  writeLine("TRAINING ROUTE", "header");
   TUTORIAL_STEPS.forEach((step, i) => {
     const done = state.tutorial.completed.has(step.id) ? "[X]" : "[ ]";
     const here = i === state.tutorial.stepIndex ? " <" : "";
@@ -2197,6 +2527,24 @@ function buildContext(currentScript, outputKind) {
   return {
     print: (msg) => writeBlock(String(msg), kind),
     scratch: (msg) => scratchAppend(String(msg)),
+    handle: () => String(state.handle || "ghost"),
+    util: {
+      checksum: (text) => checksumUtf8Mod4096(text),
+      hex3: (n) => hex3(n),
+    },
+    files: () => {
+      const loc = getLoc(state.loc);
+      return Object.keys((loc && loc.files) || {});
+    },
+    read: (name) => {
+      const loc = getLoc(state.loc);
+      const entry = loc && loc.files && loc.files[String(name || "").trim()];
+      if (!entry) return null;
+      if (entry.type === "text") return String(entry.content || "");
+      if (entry.type === "script") return String(entry.content || "");
+      if (entry.type === "item" || entry.type === "upgrade") return String(entry.content || "");
+      return null;
+    },
     discover: (locs) => {
       const added = discover(locs || []);
       if (added.length) writeLine("New signals: " + added.join(", "), "ok");
@@ -2300,6 +2648,25 @@ function storyChatTick() {
     });
     return;
   }
+  if (state.unlocked.has("training.node") && !state.flags.has("chat_prologue_done")) {
+    state.flags.add("chat_prologue_done");
+    chatPost({
+      channel: "#kernel",
+      from: "switchboard",
+      body: "Training node cleared. Route to the exchange and pull tools.",
+    });
+    return;
+  }
+  if (state.unlocked.has("pier.gate") && !state.flags.has("chat_pier_gate")) {
+    state.flags.add("chat_pier_gate");
+    discover(["ember.pier"]);
+    chatPost({
+      channel: "#kernel",
+      from: "switchboard",
+      body: "Signal edge widened. New loc: `ember.pier` (breach it, then connect).",
+    });
+    return;
+  }
   if (state.flags.has("ember_phrase") && !state.flags.has("chat_ember")) {
     state.flags.add("chat_ember");
     chatPost({
@@ -2326,8 +2693,25 @@ function storyChatTick() {
       body: "If you can read the sigil, the lattice can read you back.",
     });
   }
+  if (state.unlocked.has("lattice.cache") && !state.flags.has("chat_act3")) {
+    state.flags.add("chat_act3");
+    if (!state.flags.has("corrupt_act3")) {
+      state.flags.add("corrupt_act3");
+      setCorruptionLevel(Math.max(corruptionLevel(), 2));
+    }
+    chatPost({
+      channel: "#kernel",
+      from: "archivist",
+      body: "The Warden wakes when you approach the core. Compute clean. Move fast.",
+    });
+    return;
+  }
   if (state.flags.has("sniffer_run") && !state.flags.has("chat_sniffer")) {
     state.flags.add("chat_sniffer");
+    if (!state.flags.has("corrupt_act2")) {
+      state.flags.add("corrupt_act2");
+      setCorruptionLevel(Math.max(corruptionLevel(), 1));
+    }
     chatPost({
       channel: "#kernel",
       from: "switchboard",
@@ -2397,6 +2781,12 @@ function canAttemptLoc(locName) {
 }
 
 function startBreach(locName) {
+  // Clear any prior breach pressure loop.
+  if (state.breach && state.breach.pressure) {
+    try {
+      window.clearInterval(state.breach.pressure);
+    } catch {}
+  }
   const loc = getLoc(locName);
   if (!loc) {
     writeLine("Loc not found.", "error");
@@ -2418,14 +2808,9 @@ function startBreach(locName) {
     writeLine("Pre-check failed. Missing " + needs.join(" | "), "warn");
     return;
   }
-  state.breach = { loc: locName, index: 0 };
+  state.breach = { loc: locName, index: 0, pressure: null };
   writeLine(`BREACHING ${locName}`, "header");
-  chatPost({
-    channel: "#kernel",
-    from: "trust",
-    body: `breach.start ${locName}`,
-    kind: "trust",
-  });
+  writeLine(`sys::breach.start ${locName}`, "trust");
   if (!loc.locks.length) {
     writeLine("No locks detected. Access open.", "ok");
     state.unlocked.add(locName);
@@ -2433,6 +2818,17 @@ function startBreach(locName) {
     state.breach = null;
     return;
   }
+
+  // Boss-like pressure: the warden pulses trace while you're inside the core lock stack.
+  if (locName === "core.relic") {
+    setCorruptionLevel(Math.max(corruptionLevel(), 2));
+    state.breach.pressure = window.setInterval(() => {
+      if (!state.breach || state.breach.loc !== "core.relic") return;
+      writeLine("WARDEN PULSE :: trace rising", "warn");
+      failBreach();
+    }, 7000);
+  }
+
   writeLine(loc.locks[0].prompt, "warn");
 }
 
@@ -2454,10 +2850,12 @@ function unlockAttempt(answer) {
     writeLine("No active breach.", "warn");
     return;
   }
+  const pressure = state.breach.pressure;
   const loc = getLoc(state.breach.loc);
   const lock = loc.locks[state.breach.index];
   if (!lock) {
     writeLine("Lock stack exhausted.", "dim");
+    if (pressure) window.clearInterval(pressure);
     state.breach = null;
     return;
   }
@@ -2466,25 +2864,18 @@ function unlockAttempt(answer) {
     writeLine("Supply an answer.", "warn");
     return;
   }
-  if (normalized.toUpperCase() === lock.answer.toUpperCase()) {
+  const expected =
+    typeof lock.answer === "function" ? String(lock.answer()) : String(lock.answer || "");
+  if (normalized.toUpperCase() === expected.toUpperCase()) {
     writeLine("LOCK CLEARED", "ok");
-    chatPost({
-      channel: "#kernel",
-      from: "trust",
-      body: "lock.cleared",
-      kind: "trust",
-    });
+    writeLine("sys::lock.cleared", "trust");
     state.breach.index += 1;
     if (state.breach.index >= loc.locks.length) {
       writeLine("STACK CLEARED. ACCESS OPEN.", "ok");
       state.unlocked.add(state.breach.loc);
       setMark("mark.breach");
-      chatPost({
-        channel: "#kernel",
-        from: "trust",
-        body: `breach.success ${state.breach.loc}`,
-        kind: "trust",
-      });
+      if (pressure) window.clearInterval(pressure);
+      writeLine(`sys::breach.success ${state.breach.loc}`, "trust");
       state.breach = null;
       return;
     }
@@ -2518,6 +2909,13 @@ function connectLoc(locName) {
     }
     if (locName === "public.exchange") {
       npcIntroduce("juniper");
+    }
+    if (locName === "ember.pier") {
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "The pier watches you back. Decode pier.b64 if you want the vibe.",
+      });
     }
     if (locName === "archives.arc") {
       npcIntroduce("archivist");
@@ -2645,16 +3043,18 @@ function loadState(options) {
   if (data.chat) {
     state.chat.channel = data.chat.channel || "#kernel";
     state.chat.channels = new Set(data.chat.channels || ["#kernel"]);
-    state.chat.log = (data.chat.log || state.chat.log).map((m) => ({
-      ...m,
-      color: m.kind === "trust" ? null : m.color || userColorClass(m.from),
-      uid: m.uid || (m.kind === "trust" ? "0000" : userId4(m.from)),
-    }));
+    state.chat.log = (data.chat.log || state.chat.log)
+      .filter((m) => !(m && (m.kind === "trust" || m.from === "trust")))
+      .map((m) => ({
+        ...m,
+        color: m.kind === "system" ? null : m.color || userColorClass(m.from),
+        uid: m.uid || (m.kind === "system" ? "----" : userId4(m.from)),
+      }));
     renderChat();
   }
   // scratchpad is user-authored; don't clear on load
   if (!opts.silent) writeLine("State loaded.", "ok");
-  document.body.classList.toggle("corrupt", state.flags.has("corruption"));
+  applyCorruptionClasses();
   showLoc();
   storyChatTick();
   tutorialAdvance();
@@ -2807,7 +3207,7 @@ function handleCommand(inputText) {
     }
     state.handle = trimmed || "ghost";
     writeLine(`HANDLE SET: ${state.handle}`, "ok");
-    chatPost({ channel: "#kernel", from: state.handle, body: "connected" });
+    chatPost({ channel: state.chat.channel, from: "sys", body: `*** ${state.handle} connected`, kind: "system" });
     loadScratchFromStorage();
     showLoc();
     storyChatTick();
@@ -3070,6 +3470,9 @@ function handleCommand(inputText) {
         writeLine("Type: restart --confirm", "warn");
         break;
       }
+      if (state.handle) {
+        chatPost({ channel: state.chat.channel, from: "sys", body: `*** ${state.handle} disconnected`, kind: "system" });
+      }
       localStorage.removeItem(SAVE_KEY);
       screen.innerHTML = "";
       resetToFreshState(true);
@@ -3113,14 +3516,20 @@ function handleCommand(inputText) {
         break;
       }
       state.flags.add("touched_relic");
-      setCorruption(true);
+      setCorruptionLevel(3);
       writeLine("SIGNAL CORRUPTION DETECTED. Type `stabilize` to clear.", "warn");
-      discover(["echo.after"]);
+      discover(["echo.after", "victory.hall"]);
       state.unlocked.add("echo.after");
+      state.unlocked.add("victory.hall");
       chatPost({
         channel: "#kernel",
         from: "archivist",
         body: "If you took it, follow the echo. (connect echo.after)",
+      });
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "A clean pocket opens in the aftermath. (connect victory.hall)",
       });
       writeBlock(
         [
@@ -3136,14 +3545,20 @@ function handleCommand(inputText) {
         break;
       }
       state.flags.add("touched_relic");
-      setCorruption(true);
+      setCorruptionLevel(3);
       writeLine("SIGNAL CORRUPTION DETECTED. Type `stabilize` to clear.", "warn");
-      discover(["echo.after"]);
+      discover(["echo.after", "victory.hall"]);
       state.unlocked.add("echo.after");
+      state.unlocked.add("victory.hall");
       chatPost({
         channel: "#kernel",
         from: "archivist",
         body: "You left it, but it left a mark. Follow the echo. (connect echo.after)",
+      });
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "A clean pocket opens in the aftermath. (connect victory.hall)",
       });
       writeBlock(
         [
@@ -3281,10 +3696,21 @@ if (chatInput) {
         chatSystem("channels: " + Array.from(state.chat.channels).sort().join(", "));
         return;
       }
+      if (cmd === "tell" || cmd === "dm" || cmd === "whisper") {
+        if (!args[0]) {
+          chatSystem("Usage: /tell <npc> <msg>");
+          return;
+        }
+        const npc = args[0];
+        const msg = args.slice(1).join(" ");
+        tellNpc(npc, msg);
+        return;
+      }
       chatSystem("Unknown chat command. Try /help");
       return;
     }
 
+    // Plain text in the chat box behaves like `say ...`
     chatPost({ body: value });
   });
 }
