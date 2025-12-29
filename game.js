@@ -3880,6 +3880,22 @@ function readAnyText(ref) {
   return String(entry.content || "");
 }
 
+function extractScriptFromTemplateText(text) {
+  const raw = String(text || "");
+  const lines = raw.split("\n");
+  const start = lines.findIndex((l) =>
+    /^\s*(\/\/\s*@sec\b|const\b|let\b|var\b|function\b|if\b|for\b|while\b|ctx\.|\/\*|return\b)/i.test(
+      l
+    )
+  );
+  if (start === -1) return raw;
+  let out = lines.slice(start).join("\n");
+  if (!/@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i.test(out)) {
+    out = "// @sec FULLSEC\n" + out;
+  }
+  return out;
+}
+
 function setEditor(name, options) {
   const opts = options || {};
   const prefill = typeof opts.prefill === "string" ? opts.prefill : null;
@@ -4282,6 +4298,7 @@ function handleCommand(inputText) {
           writeLine("Create or overwrite a script: `edit chk` then `:wq`", "dim");
           writeLine("Load the checksum template: `edit chk --example`", "dim");
           writeLine("Or: `edit chk --from chk.example`", "dim");
+          writeLine("Note: templates are sanitized to code-only (header text is stripped).", "dim");
           break;
         }
 
@@ -4414,7 +4431,8 @@ function handleCommand(inputText) {
           setEditor(name);
           break;
         }
-        setEditor(name, template ? { prefill: template } : undefined);
+        const prefill = template ? extractScriptFromTemplateText(template) : null;
+        setEditor(name, prefill ? { prefill } : undefined);
       }
       break;
     case "scan":
