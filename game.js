@@ -96,9 +96,17 @@ function hex3(n) {
   return v.toString(16).toUpperCase().padStart(3, "0");
 }
 
-function expectedForChecksumPayload(payload) {
+function handleTag() {
   const handle = state.handle ? String(state.handle) : "ghost";
-  return hex3(checksumUtf8Mod4096(`${payload}|HANDLE=${handle}`));
+  return `HANDLE=${handle}`;
+}
+
+function primerTextForHandle(payload) {
+  return `${payload}|${handleTag()}`;
+}
+
+function expectedForChecksumPayload(payload) {
+  return hex3(checksumUtf8Mod4096(primerTextForHandle(payload)));
 }
 
 const screen = document.getElementById("screen");
@@ -1964,6 +1972,8 @@ const LOCS = {
           "  inventory                list items and kit",
           "  save / load              save or load",
           "  export / import          move saves between browsers",
+          "",
+          "New operators: read `script.intro` for a plain-language scripting primer.",
         ].join("\n"),
       },
       "primer.dat": {
@@ -1977,10 +1987,51 @@ const LOCS = {
           "ALGO: checksum(text) = (sum of UTF-8 bytes) % 4096",
           "Format as 3-hex (uppercase). Example: 00A, 8EB, FFF",
           "",
+          "Key 1: HANDLE=<your_handle>",
           "payload=" + PRIMER_PAYLOAD,
-          "text = payload + '|HANDLE=<your_handle>'",
+          "Key 2: text = payload + '|HANDLE=<your_handle>'",
+          "Key 3: checksum(text) -> hex3",
           "",
-          "Target: training.node lock expects checksum(text).",
+          "Target: training.node lock expects Key 1, Key 2, then Key 3 (in order).",
+        ].join("\n"),
+      },
+      "script.intro": {
+        type: "text",
+        content: [
+          "SCRIPT.INTRO",
+          "A no-code intro to scripts (tiny JavaScript helpers).",
+          "",
+          "Why scripts?",
+          "- They repeat your steps exactly.",
+          "- They cut typos out of lock answers.",
+          "- They let you scale from one task to many.",
+          "",
+          "1) Print output (your first script).",
+          "  ctx.print('hello');",
+          "",
+          "2) Use your handle (the shell knows it).",
+          "  ctx.print('HANDLE=' + ctx.handle());",
+          "",
+          "3) Accept input (args are words after the script name).",
+          "  const who = args._[0] || 'DRIFT';",
+          "  ctx.print('hi ' + who);",
+          "  // run: call <you>.hello weaver",
+          "",
+          "4) Read a file (text in, text out).",
+          "  const primer = ctx.read('primer.dat') || '';",
+          "",
+          "5) Build text, then checksum it (lock answers).",
+          "  const text = '<payload>' + '|HANDLE=' + ctx.handle();",
+          "  const sum = ctx.util.checksum(text);",
+          "  ctx.print(ctx.util.hex3(sum));",
+          "",
+          "Training.node uses three keys:",
+          "  KEY1 = HANDLE=<your_handle>",
+          "  KEY2 = payload|KEY1  (see primer.dat)",
+          "  KEY3 = hex3(checksum(KEY2))",
+          "Keep your outputs; the three keys form an access phrase.",
+          "",
+          "Fast path: `edit chk --example`, then `:wq`.",
         ].join("\n"),
       },
       "chk.example": {
@@ -2034,9 +2085,19 @@ const LOCS = {
     requirements: {},
     locks: [
       {
-        prompt: "LOCK: provide primer checksum (hex3)",
+        prompt: "LOCK: provide handle tag (KEY1)",
+        answer: () => handleTag(),
+        hint: "Key 1 is HANDLE=<your_handle>. Script: ctx.print('HANDLE=' + ctx.handle()).",
+      },
+      {
+        prompt: "LOCK: provide joined text (KEY2)",
+        answer: () => primerTextForHandle(PRIMER_PAYLOAD),
+        hint: "Key 2 is payload|HANDLE=<your_handle> from primer.dat.",
+      },
+      {
+        prompt: "LOCK: provide checksum (KEY3, hex3)",
         answer: () => expectedForChecksumPayload(PRIMER_PAYLOAD),
-        hint: "Read primer.dat at home.hub. Answer is checksum(payload|HANDLE=<your_handle>).",
+        hint: "Checksum the joined text. See script.intro or chk.example.",
       },
     ],
     links: ["home.hub"],
@@ -2047,6 +2108,10 @@ const LOCS = {
           "LAB LOG",
           "If you cleared this, you're ready to leave the lab.",
           "Next: connect public.exchange, pull tools, breach gates.",
+          "",
+          "You just solved three keys. Combine them for a full phrase:",
+          "  KEY1 :: KEY2 :: KEY3",
+          "Keep that habit. Complex locks are just small keys in order.",
           "",
           "Tip: write helper scripts.",
           "",
@@ -3812,6 +3877,7 @@ function readFile(name) {
 
   writeBlock(entry.content, "dim");
   if (String(name || "").toLowerCase() === "primer.dat") state.flags.add("read_primer");
+  if (String(name || "").toLowerCase() === "script.intro") state.flags.add("read_script_intro");
   if (entry.cipher) {
     state.lastCipher = entry.content;
   }
@@ -4120,6 +4186,18 @@ const TUTORIAL_STEPS = [
       }),
   },
   {
+    id: "t_script_intro",
+    title: "Learn The Script Basics",
+    hint: "Run `cat script.intro` at home.hub.",
+    check: () => state.flags.has("read_script_intro"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "No code? No problem. Read `script.intro` for the why + how.",
+      }),
+  },
+  {
     id: "t_edit",
     title: "Write Your First Script",
     hint: "Run `edit chk --example`, then `:wq` to save.",
@@ -4147,13 +4225,13 @@ const TUTORIAL_STEPS = [
   {
     id: "t_training",
     title: "Open The Training Node",
-    hint: "Run `breach training.node`, then `unlock <hex3>`, then `connect training.node`.",
+    hint: "Run `breach training.node`, then `unlock <key1>`, `unlock <key2>`, `unlock <key3>`, then `connect training.node`.",
     check: () => state.unlocked.has("training.node") && state.loc === "training.node",
     onStart: () =>
       chatPost({
         channel: "#kernel",
         from: "switchboard",
-        body: "Use your checksum output to open `training.node`. No guessing.",
+        body: "Use the three keys from primer.dat + script.intro to open `training.node`. No guessing.",
       }),
   },
   {
