@@ -14,6 +14,17 @@ const SEC_LEVELS = ["NULLSEC", "LOWSEC", "MIDSEC", "HIGHSEC", "FULLSEC"];
 const PRIMER_PAYLOAD = "DRIFTLOCAL::SEED=7|11|23|5|13|2";
 const WARDEN_PAYLOAD = "WARDEN::PHASE=1|KEY=RELIC|TRACE=4";
 const UPLINK_PAYLOAD = "UPLINK::PATCH=1|RELAY=MIRROR";
+const CHK_TEMPLATE_CODE = [
+  "// @sec FULLSEC",
+  "const primer = ctx.read('primer.dat') || '';",
+  "const m = primer.match(/^payload=(.*)$/m);",
+  "const payload = m ? String(m[1]).trim() : '';",
+  "if (!payload) { ctx.print('no payload'); return; }",
+  "const text = payload + '|HANDLE=' + ctx.handle();",
+  "const sum = ctx.util.checksum(text);",
+  "const out = ctx.util.hex3(sum);",
+  "ctx.print(out);",
+].join("\n");
 const UPGRADE_DEFS = {
   "upg.trace_spool": {
     name: "trace_spool",
@@ -1221,8 +1232,8 @@ const LOCS = {
           "Paste this into `edit chk` and save with `:wq`.",
           "",
           "const primer = ctx.read('primer.dat') || '';",
-          "const payloadLine = (primer.split('\\n').find(l => l.startsWith('payload=')) || '');",
-          "const payload = payloadLine.replace('payload=','').trim();",
+          "const m = primer.match(/^payload=(.*)$/m);",
+          "const payload = m ? String(m[1]).trim() : '';",
           "if (!payload) { ctx.print('no payload'); return; }",
           "const text = payload + '|HANDLE=' + ctx.handle();",
           "const sum = ctx.util.checksum(text);",
@@ -2497,9 +2508,8 @@ function readFile(name) {
     if (drive.cipher) state.lastCipher = drive.content;
     return;
   }
-  const loc = getLoc(state.loc);
-  const entry = loc.files[name];
-  if (!entry) {
+  const found = getLocFileEntry(state.loc, name);
+  if (!found) {
     const script = resolveScript(name);
     if (!script) {
       writeLine("File not found.", "error");
@@ -2514,6 +2524,7 @@ function readFile(name) {
     writeBlock(String(script.code || ""), "dim");
     return;
   }
+  const entry = found.entry;
   writeBlock(entry.content, "dim");
   if (String(name || "").toLowerCase() === "primer.dat") state.flags.add("read_primer");
   if (entry.cipher) {
@@ -3450,6 +3461,19 @@ function runUserScript(script, args) {
     state.flags.add("ran_user_script");
   } catch (err) {
     writeLine(`Script error: ${err.message}`, "error");
+    try {
+      const stack = String((err && err.stack) || "");
+      const m = stack.match(/<anonymous>:(\d+):(\d+)/);
+      if (m) {
+        const lineNo = Number(m[1]);
+        const colNo = Number(m[2]);
+        const scriptLine = Math.max(1, lineNo - 1); // account for `"use strict";` line
+        const lines = String(script.code || "").split("\n");
+        const lineText = lines[scriptLine - 1] || "";
+        writeLine(`at ${script.owner}.${script.name}:${scriptLine}:${colNo}`, "dim");
+        if (lineText) writeLine(lineText, "dim");
+      }
+    } catch {}
   }
 }
 
@@ -3862,10 +3886,25 @@ function connectLoc(locName) {
   }
 }
 
-function getLocFileText(locName, fileName) {
+function getLocFileEntry(locName, fileName) {
   const loc = getLoc(locName);
-  const entry = loc && loc.files && loc.files[String(fileName || "").trim()];
-  if (!entry) return null;
+  const key = String(fileName || "").trim();
+  if (!loc || !loc.files || !key) return null;
+
+  // Exact match first.
+  if (loc.files[key]) return { name: key, entry: loc.files[key] };
+
+  // Case-insensitive fallback (helps with user scripts that reference older casing).
+  const lower = key.toLowerCase();
+  const found = Object.keys(loc.files).find((k) => k.toLowerCase() === lower);
+  if (!found) return null;
+  return { name: found, entry: loc.files[found] };
+}
+
+function getLocFileText(locName, fileName) {
+  const found = getLocFileEntry(locName, fileName);
+  if (!found) return null;
+  const entry = found.entry;
   if (typeof entry.content === "string") return entry.content;
   return String(entry.content || "");
 }
@@ -3873,15 +3912,15 @@ function getLocFileText(locName, fileName) {
 function readAnyText(ref) {
   const drive = getDriveEntry(ref);
   if (drive) return String(drive.content || "");
-  const loc = getLoc(state.loc);
-  const entry = loc && loc.files && loc.files[String(ref || "").trim()];
-  if (!entry) return null;
+  const found = getLocFileEntry(state.loc, ref);
+  if (!found) return null;
+  const entry = found.entry;
   if (typeof entry.content === "string") return entry.content;
   return String(entry.content || "");
 }
 
 function extractScriptFromTemplateText(text) {
-  const raw = String(text || "");
+  const raw = String(text || "").replace(/\uFEFF/g, "");
   const lines = raw.split("\n");
   const start = lines.findIndex((l) =>
     /^\s*(\/\/\s*@sec\b|const\b|let\b|var\b|function\b|if\b|for\b|while\b|ctx\.|\/\*|return\b)/i.test(
@@ -3913,7 +3952,14 @@ function finishEditor(save) {
     writeLine("Editor aborted.", "warn");
     return;
   }
-  const code = editor.lines.join("\n");
+  const normalizedLines = (editor.lines || []).map((line) => {
+    const raw = String(line || "").replace(/\uFEFF/g, "");
+    // If the user types "@sec FULLSEC" without the comment prefix, auto-fix it.
+    const m = raw.match(/^\s*@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)\s*$/i);
+    if (m) return `// @sec ${m[1].toUpperCase()}`;
+    return raw;
+  });
+  const code = normalizedLines.join("\n");
   const match = code.match(/@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i);
   const sec = match ? match[1].toUpperCase() : "FULLSEC";
   state.userScripts[editor.name] = { owner: state.handle, name: editor.name, sec, code };
@@ -4299,6 +4345,7 @@ function handleCommand(inputText) {
           writeLine("Load the checksum template: `edit chk --example`", "dim");
           writeLine("Or: `edit chk --from chk.example`", "dim");
           writeLine("Note: templates are sanitized to code-only (header text is stripped).", "dim");
+          writeLine("Tip: `@sec FULLSEC` will be auto-fixed to `// @sec FULLSEC` when saving.", "dim");
           break;
         }
 
@@ -4412,9 +4459,10 @@ function handleCommand(inputText) {
       {
         const name = args[0];
         let from = null;
+        let example = false;
         for (let i = 1; i < args.length; i++) {
           const a = String(args[i] || "");
-          if (a === "--example") from = "chk.example";
+          if (a === "--example") example = true;
           if (a === "--from" && args[i + 1]) {
             from = String(args[i + 1]);
             i += 1;
@@ -4422,10 +4470,12 @@ function handleCommand(inputText) {
           if (a.startsWith("--from=")) from = a.slice("--from=".length);
         }
 
-        const template = from
-          ? readAnyText(from) || getLocFileText("home.hub", from)
-          : null;
-        if (from && !template) {
+        const template = example
+          ? CHK_TEMPLATE_CODE
+          : from
+            ? readAnyText(from) || getLocFileText("home.hub", from)
+            : null;
+        if (!example && from && !template) {
           writeLine("Template not found.", "warn");
           writeLine("Tip: at home.hub: `cat chk.example`", "dim");
           setEditor(name);
