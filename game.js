@@ -2456,8 +2456,8 @@ function getDriveEntry(ref) {
   return { id: found, ...drive[found] };
 }
 
-function listDrive() {
-  writeLine("DRIVE", "header");
+function listDriveFiles() {
+  writeLine("DRIVE FILES", "header");
   const keys = Object.keys(state.drive || {}).sort();
   if (!keys.length) {
     writeLine("(empty)", "dim");
@@ -2465,7 +2465,6 @@ function listDrive() {
     return;
   }
   writeLine(`capacity: ${driveBytesUsed()}/${state.driveMax} bytes`, "dim");
-  writeLine("note: drive is stored in browser localStorage", "dim");
   keys.slice(0, 40).forEach((k) => {
     const e = state.drive[k];
     const bytes = driveBytesForContent((e && e.content) || "");
@@ -2473,6 +2472,44 @@ function listDrive() {
     writeLine(`${driveRef(k)}  (${type}, ${bytes} bytes)`, "dim");
   });
   if (keys.length > 40) writeLine("...", "dim");
+}
+
+function driveSummary() {
+  const keys = Object.keys(state.drive || {});
+  const used = driveBytesUsed();
+  const max = Number(state.driveMax) || 0;
+  const pct = max > 0 ? Math.min(999, Math.floor((used / max) * 100)) : 0;
+  writeLine("DRIVE", "header");
+  writeLine(`usage: ${used}/${max} bytes (${pct}%)`, "dim");
+  writeLine(`files: ${keys.length}`, "dim");
+  writeLine("note: drive is stored in browser localStorage", "dim");
+  if (!keys.length) {
+    writeLine("Tip: `download cipher.txt` then `cat drive:sable.gate/cipher.txt`", "dim");
+    return;
+  }
+  // Show top largest files (helps players decide what to delete).
+  const largest = keys
+    .map((k) => {
+      const e = state.drive[k];
+      const bytes = driveBytesForContent((e && e.content) || "");
+      return { k, bytes, type: (e && e.type) || "file" };
+    })
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, 8);
+  writeLine("largest:", "dim");
+  largest.forEach((x) => writeLine(`${driveRef(x.k)}  (${x.type}, ${x.bytes} bytes)`, "dim"));
+  writeLine("Tip: `drive ls` to list all, or `del drive:<loc>/<file>` to free space.", "dim");
+}
+
+function driveCommand(args) {
+  const sub = String((args && args[0]) || "")
+    .trim()
+    .toLowerCase();
+  if (sub === "ls" || sub === "list") {
+    listDriveFiles();
+    return;
+  }
+  driveSummary();
 }
 
 function listHistory(args) {
@@ -4937,7 +4974,8 @@ function handleCommand(inputText) {
 
         if (topic === "drive") {
           writeLine("help drive", "header");
-          writeLine("List downloaded files (scripts/items/text): `drive`", "dim");
+          writeLine("Show drive usage (localStorage): `drive`", "dim");
+          writeLine("List drive files: `drive ls`", "dim");
           writeLine("Read one: `cat drive:sable.gate/cipher.txt`", "dim");
           writeLine("Tip: cipher files set your decode buffer (like `cat` does).", "dim");
           writeLine("Note: your local scripts are mirrored into drive too (so size matters).", "dim");
@@ -5125,7 +5163,7 @@ function handleCommand(inputText) {
       downloadsStatus();
       break;
     case "drive":
-      listDrive();
+      driveCommand(args);
       break;
     case "history":
       listHistory(args);
@@ -5636,6 +5674,8 @@ function completeInput({ direction = 1 } = {}) {
     else candidates = allLocNames();
   } else if (cmd === "del") {
     candidates = uniqueSorted([...allDriveRefs(), ...allUserScriptRefs()]);
+  } else if (cmd === "drive") {
+    candidates = ["ls", "list"];
   } else if (cmd === "decode") {
     candidates = ["rot13", "b64"];
   } else if (cmd === "install") {
