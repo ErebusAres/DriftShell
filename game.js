@@ -14,6 +14,8 @@ const SEC_LEVELS = ["NULLSEC", "LOWSEC", "MIDSEC", "HIGHSEC", "FULLSEC"];
 // Drive capacity is an in-world abstraction of browser localStorage limits.
 // Keep it comfortably below typical per-origin quotas (~5MB).
 const DRIVE_MAX_CAP_BYTES = 4_000_000;
+// Hackmud-like corruption glyph for "missing" characters in the signal.
+const GLITCH_GLYPH = "▓";
 const PRIMER_PAYLOAD = "DRIFTLOCAL::SEED=7|11|23|5|13|2";
 const WARDEN_PAYLOAD = "WARDEN::PHASE=1|KEY=RELIC|TRACE=4";
 const UPLINK_PAYLOAD = "UPLINK::PATCH=1|RELAY=MIRROR";
@@ -1026,7 +1028,7 @@ const NPCS = {
     id: "juniper",
     display: "juniper",
     intro:
-      "Welcome to my exchange. I sell junk, not morals. Ask for `work` if you want a contract.",
+      "Welcome to my exchange. I sell junk, not morals.",
   },
   archivist: {
     id: "archivist",
@@ -1050,6 +1052,14 @@ function npcIntroduce(id) {
   const npc = NPCS[id];
   if (!npc) return;
   if (!npcKnown(id)) state.npcs.known.add(id);
+  if (id === "juniper") {
+    const hasWork = !state.flags.has("q_juniper_mask_done");
+    const intro = hasWork
+      ? "Welcome to my exchange. I sell junk, not morals. Ask for `work` if you want a contract."
+      : "Welcome to my exchange. I sell junk, not morals. No contracts right now—browse the store.";
+    chatPost({ channel: "#kernel", from: npc.display, body: intro });
+    return;
+  }
   chatPost({ channel: "#kernel", from: npc.display, body: npc.intro });
 }
 
@@ -1166,13 +1176,13 @@ function npcReply(npcId, body) {
         channel: dmChannel(npcId),
         from: "switchboard",
         body:
-          "Uploads are how you push your work back into the net. Connect `relay.uplink` to unlock remote upload routing.",
+          "Uploads are how you push your work back into the node you're connected to.",
       });
       chatPost({
         channel: dmChannel(npcId),
         from: "switchboard",
         body:
-          "Flow: `drive` to list downloaded files; `upload drive:loc/file relay.uplink` or `upload <you>.patch patch.s`. Track with `uploads`.",
+          "Flow: `drive ls` to find a file; connect the target loc; then `upload <src> <file>`. Track with `uploads`.",
       });
       return;
     }
@@ -1186,6 +1196,23 @@ function npcReply(npcId, body) {
 
   if (npcId === "juniper") {
     if (msg.includes("work")) {
+      if (state.flags.has("q_juniper_mask_done")) {
+        chatPost({
+          channel: dmChannel(npcId),
+          from: "juniper",
+          body: "No contracts right now. Check the store. Keep your trace low.",
+        });
+        return;
+      }
+      if (state.flags.has("q_juniper_mask")) {
+        chatPost({
+          channel: dmChannel(npcId),
+          from: "juniper",
+          body:
+            "Same contract. Pull `mask.dat` (download spoof.s; call kit.spoof). Then `turnin mask` at the exchange.",
+        });
+        return;
+      }
       chatPost({
         channel: dmChannel(npcId),
         from: "juniper",
@@ -1217,7 +1244,7 @@ function npcReply(npcId, body) {
       chatPost({
         channel: dmChannel(npcId),
         from: "juniper",
-        body: "Clean enough. +50GC. Tip: breach `archives.arc` once you’ve got the ember phrase.",
+        body: "Clean enough. +50GC. Tip: breach `archives.arc` once you've got the ember phrase.",
       });
       updateHud();
       return;
@@ -1242,8 +1269,17 @@ function npcReply(npcId, body) {
     chatPost({
       channel: dmChannel(npcId),
       from: "juniper",
-      body: "Say `work` for a contract, or ask about `locks`, `scripts`, or `trace`.",
+      body: state.flags.has("q_juniper_mask_done")
+        ? "Ask about `locks`, `scripts`, or `trace`."
+        : "Say `work` for a contract, or ask about `locks`, `scripts`, or `trace`.",
     });
+    if (state.flags.has("q_juniper_mask_done")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "juniper",
+        body: "You already cashed the only job I had. Try the archive if you're hungry.",
+      });
+    }
     return;
   }
 
@@ -2204,7 +2240,8 @@ const LOCS = {
       "glitch.rot13": {
         type: "text",
         cipher: true,
-        content: "gur qevsg qbrfa'g gel gb oernx lbh. vg gebjf lbh.",
+        // Intentionally corrupted: the block character represents a "missing" letter in the signal.
+        content: `gur qevsg qbrfa'g gel gb oernx lbh. vg g${GLITCH_GLYPH}ebjf lbh.`,
       },
     },
   },
@@ -2223,6 +2260,17 @@ function discover(locs) {
     }
   });
   return newly;
+}
+
+function requirementsMet(locName) {
+  const loc = getLoc(locName);
+  if (!loc) return false;
+  const req = loc.requirements || {};
+  const flags = Array.isArray(req.flags) ? req.flags : [];
+  const items = Array.isArray(req.items) ? req.items : [];
+  const okFlags = flags.every((f) => state.flags.has(String(f)));
+  const okItems = items.every((i) => state.inventory.has(String(i)));
+  return okFlags && okItems;
 }
 
 function setMark(id) {
@@ -2688,6 +2736,37 @@ function listHistory(args) {
 
 function driveHas(id) {
   return !!(state.drive && state.drive[id]);
+}
+
+function updateDriveContent(id, nextContent, meta) {
+  const key = String(id || "").trim();
+  if (!key) return { ok: false, reason: "invalid" };
+  const prior = state.drive && state.drive[key] ? state.drive[key] : null;
+  const prevBytes = prior ? driveBytesForContent(String(prior.content || "")) : 0;
+  const nextText = String(nextContent || "");
+  const nextBytes = driveBytesForContent(nextText);
+  const used = driveBytesUsed();
+  const max = Number(state.driveMax) || 0;
+  const nextUsed = Math.max(0, used - prevBytes + nextBytes);
+  if (nextUsed > max) return { ok: false, reason: "full", bytes: nextBytes, used: nextUsed, max };
+
+  const parts = key.split("/");
+  const loc = parts[0] || "local";
+  const name = parts.slice(1).join("/") || key;
+  const type = prior && prior.type ? prior.type : "text";
+
+  state.drive[key] = {
+    loc,
+    name,
+    type,
+    content: nextText,
+    cipher: prior ? !!prior.cipher : false,
+    downloadedAt: prior && prior.downloadedAt ? prior.downloadedAt : Date.now(),
+    editedAt: Date.now(),
+    editedBy: state.handle || "ghost",
+    ...(meta && typeof meta === "object" ? meta : {}),
+  };
+  return { ok: true, id: key, bytes: nextBytes, used: nextUsed, max };
 }
 
 function storeDriveCopy(locName, fileName, entry) {
@@ -4619,14 +4698,41 @@ function unlockAttempt(answer) {
 }
 
 function connectLoc(locName) {
+  const autoBreach = arguments.length > 1 && arguments[1] && arguments[1].autoBreach;
   if (!state.discovered.has(locName)) {
     writeLine("Unknown loc. Run scripts.trust.scan or discover it.", "warn");
     return;
   }
-  if (!state.unlocked.has(locName)) {
-    writeLine("Access denied. Use breach to solve the lock stack.", "warn");
+  const loc = getLoc(locName);
+  if (!loc) {
+    writeLine("Loc not found.", "error");
     return;
   }
+  if (!requirementsMet(locName)) {
+    writeLine("Requirements not met for this loc.", "warn");
+    const req = loc.requirements || {};
+    const flags = Array.isArray(req.flags) ? req.flags : [];
+    const items = Array.isArray(req.items) ? req.items : [];
+    if (flags.length) writeLine("Need flags: " + flags.join(", "), "dim");
+    if (items.length) writeLine("Need items: " + items.join(", "), "dim");
+    return;
+  }
+
+  // No-lock locations should not require a breach. Treat them as open once requirements are met.
+  if (!state.unlocked.has(locName) && Array.isArray(loc.locks) && loc.locks.length === 0) {
+    state.unlocked.add(locName);
+  }
+
+  if (!state.unlocked.has(locName)) {
+    if (autoBreach) {
+      startBreach(locName);
+      return;
+    }
+    writeLine("Access denied. Use breach to solve the lock stack.", "warn");
+    writeLine(`Tip: breach ${locName}  (or: connect ${locName} --breach)`, "dim");
+    return;
+  }
+
   state.loc = locName;
   showLoc();
   if (!state.flags.has("seen_" + locName)) {
@@ -4723,11 +4829,20 @@ function extractScriptFromTemplateText(text) {
 function setEditor(name, options) {
   const opts = options || {};
   const prefill = typeof opts.prefill === "string" ? opts.prefill : null;
-  state.editor = { name, lines: prefill ? String(prefill).split("\n") : [] };
+  const mode = opts.mode === "drive" ? "drive" : "script";
+  const driveIdRef = mode === "drive" ? String(opts.driveId || "").trim() : null;
+  state.editor = { name, mode, driveId: driveIdRef, lines: prefill ? String(prefill).split("\n") : [] };
   writeLine("EDITOR MODE :: type :wq to save, :q to abort", "warn");
+  if (mode === "drive") {
+    writeLine(`Editing drive:${driveIdRef || name}`, "dim");
+    writeLine("Editor cmds: :p (print), :d N (delete), :r N <text> (replace)", "dim");
+    writeLine("            :i N <text> (insert), :a N <text> (append), :clear", "dim");
+    return;
+  }
   writeLine(`Editing ${state.handle}.${name}`, "dim");
   writeLine("Tip: add `// @sec FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC`", "dim");
-  if (prefill) writeLine("Loaded template. Edit, then `:wq`.", "dim");
+  writeLine("Editor cmds: :p (print), :d N (delete), :r N <text> (replace)", "dim");
+  if (prefill) writeLine("Loaded content. Edit, then `:wq`.", "dim");
 }
 
 function finishEditor(save) {
@@ -4746,7 +4861,31 @@ function finishEditor(save) {
     if (m) return `// @sec ${m[1].toUpperCase()}`;
     return raw;
   });
-  const code = normalizedLines.join("\n");
+  const outText = normalizedLines.join("\n");
+
+  if (editor.mode === "drive") {
+    const id = String(editor.driveId || "").trim();
+    if (!id) {
+      writeLine("Editor error: missing drive target.", "error");
+      return;
+    }
+    const res = updateDriveContent(id, outText, { type: "text" });
+    if (!res.ok) {
+      if (res.reason === "full") {
+        writeLine("Drive full (edit not saved).", "error");
+        writeLine("Tip: delete files with `del loc/file` or buy `upg.drive_ext`.", "dim");
+        return;
+      }
+      writeLine("Drive edit failed.", "error");
+      return;
+    }
+    writeLine(`Saved ${driveRef(id)} (${formatBytesShort(res.bytes)})`, "ok");
+    trackRecentFile(driveRef(id));
+    markDirty();
+    return;
+  }
+
+  const code = outText;
   if (!code.trim()) {
     writeLine("Nothing to save (script empty).", "warn");
     writeLine("Tip: `edit " + editor.name + "` then paste code; multi-line paste is supported.", "dim");
@@ -4757,11 +4896,10 @@ function finishEditor(save) {
   state.userScripts[editor.name] = { owner: state.handle, name: editor.name, sec, code };
   writeLine(`Saved ${state.handle}.${editor.name} [${sec}]`, "ok");
   // Mirror local script into drive so size matters.
-  const mirrored = storeDriveCopy(
-    "local",
-    `${state.handle}.${editor.name}.s`,
-    { type: "script", script: { name: editor.name, sec, code } }
-  );
+  const mirrored = storeDriveCopy("local", `${state.handle}.${editor.name}.s`, {
+    type: "script",
+    script: { name: editor.name, sec, code },
+  });
   if (!mirrored.ok) {
     writeLine("sys::drive full (script not mirrored)", "warn");
     writeLine("Tip: buy/install `upg.drive_ext` or delete with `del drive:...`", "dim");
@@ -5059,16 +5197,124 @@ function handleCommand(inputText) {
   if (!trimmed) return;
 
   if (state.editor) {
-    if (trimmed === ":q") {
-      finishEditor(false);
-      updateHud();
+    const t = trimmed;
+    if (t.startsWith(":")) {
+      const cmdLine = t.slice(1).trim();
+      const parts = cmdLine.length ? splitArgs(cmdLine) : [];
+      const ecmd = (parts[0] || "").toLowerCase();
+      const arg1 = parts[1];
+      const rest = parts.slice(2).join(" ");
+
+      const printBuf = () => {
+        const lines = state.editor.lines || [];
+        writeLine("EDITOR BUFFER", "header");
+        if (!lines.length) {
+          writeLine("(empty)", "dim");
+          return;
+        }
+        const show = lines.slice(0, 60);
+        show.forEach((line, idx) => {
+          const n = String(idx + 1).padStart(3, "0");
+          writeLine(`${n}  ${line}`, "dim");
+        });
+        if (lines.length > show.length) writeLine("...", "dim");
+      };
+
+      const parseLineNo = (token) => {
+        const n = Number(token);
+        if (!Number.isFinite(n)) return null;
+        const i = Math.floor(n) - 1;
+        if (i < 0) return null;
+        return i;
+      };
+
+      if (ecmd === "q") {
+        finishEditor(false);
+        updateHud();
+        return;
+      }
+      if (ecmd === "wq") {
+        finishEditor(true);
+        updateHud();
+        return;
+      }
+      if (ecmd === "" || ecmd === "help") {
+        writeLine("EDITOR CMDS", "header");
+        writeLine(":p               (print buffer w/ line numbers)", "dim");
+        writeLine(":d N             (delete line N)", "dim");
+        writeLine(":r N <text>      (replace line N)", "dim");
+        writeLine(":i N <text>      (insert before line N)", "dim");
+        writeLine(":a N <text>      (append after line N)", "dim");
+        writeLine(":clear           (clear buffer)", "dim");
+        writeLine(":wq / :q         (save / abort)", "dim");
+        return;
+      }
+      if (ecmd === "p" || ecmd === "ls" || ecmd === "print") {
+        printBuf();
+        return;
+      }
+      if (ecmd === "clear") {
+        state.editor.lines = [];
+        writeLine("Editor buffer cleared.", "warn");
+        return;
+      }
+      if (ecmd === "d") {
+        const i = parseLineNo(arg1);
+        if (i === null) {
+          writeLine("Usage: :d N", "warn");
+          return;
+        }
+        if (i >= state.editor.lines.length) {
+          writeLine("Line out of range.", "warn");
+          return;
+        }
+        state.editor.lines.splice(i, 1);
+        writeLine(`Deleted line ${i + 1}.`, "ok");
+        return;
+      }
+      if (ecmd === "r") {
+        const i = parseLineNo(arg1);
+        if (i === null) {
+          writeLine("Usage: :r N <text>", "warn");
+          return;
+        }
+        if (i >= state.editor.lines.length) {
+          writeLine("Line out of range.", "warn");
+          return;
+        }
+        state.editor.lines[i] = parts.slice(2).join(" ");
+        writeLine(`Replaced line ${i + 1}.`, "ok");
+        return;
+      }
+      if (ecmd === "i") {
+        const i = parseLineNo(arg1);
+        if (i === null) {
+          writeLine("Usage: :i N <text>", "warn");
+          return;
+        }
+        const textToInsert = parts.slice(2).join(" ");
+        state.editor.lines.splice(Math.min(i, state.editor.lines.length), 0, textToInsert);
+        writeLine(`Inserted before line ${i + 1}.`, "ok");
+        return;
+      }
+      if (ecmd === "a") {
+        const i = parseLineNo(arg1);
+        if (i === null) {
+          writeLine("Usage: :a N <text>", "warn");
+          return;
+        }
+        const textToInsert = parts.slice(2).join(" ");
+        const at = Math.min(i + 1, state.editor.lines.length);
+        state.editor.lines.splice(at, 0, textToInsert);
+        writeLine(`Appended after line ${i + 1}.`, "ok");
+        return;
+      }
+
+      writeLine("Unknown editor cmd. Type :help", "warn");
       return;
     }
-    if (trimmed === ":wq") {
-      finishEditor(true);
-      updateHud();
-      return;
-    }
+
+    // Default: append raw line as-is.
     state.editor.lines.push(raw);
     return;
   }
@@ -5158,11 +5404,13 @@ function handleCommand(inputText) {
 
         if (topic === "edit") {
           writeLine("help edit", "header");
-          writeLine("Create or overwrite a script: `edit chk` then `:wq`", "dim");
+          writeLine("Create or edit a script: `edit chk` then `:wq`", "dim");
           writeLine("Load the checksum template: `edit chk --example`", "dim");
           writeLine("Or: `edit chk --from chk.example`", "dim");
           writeLine("Note: templates are sanitized to code-only (header text is stripped).", "dim");
           writeLine("Tip: `@sec FULLSEC` will be auto-fixed to `// @sec FULLSEC` when saving.", "dim");
+          writeLine("Edit a drive file: `edit drive:local/notes.txt`", "dim");
+          writeLine("Editor cmds: :p, :d N, :r N <text>, :i N <text>, :a N <text>", "dim");
           break;
         }
 
@@ -5232,6 +5480,14 @@ function handleCommand(inputText) {
           break;
         }
 
+        if (topic === "connect") {
+          writeLine("help connect", "header");
+          writeLine("Connect to a discovered loc: `connect public.exchange`", "dim");
+          writeLine("If locked: `breach public.exchange` (or `connect public.exchange --breach`)", "dim");
+          writeLine("No-lock locs open automatically once requirements are met.", "dim");
+          break;
+        }
+
         if (topic === "chat") {
           writeLine("help chat", "header");
           writeLine("Send: `say hello`", "dim");
@@ -5287,6 +5543,18 @@ function handleCommand(inputText) {
       }
       {
         const name = args[0];
+        if (/^drive:/i.test(name)) {
+          const id = String(name).replace(/^drive:/i, "").trim();
+          if (!id || !id.includes("/")) {
+            writeLine("Usage: edit drive:<loc>/<file>", "warn");
+            break;
+          }
+          const existing = getDriveEntry(name);
+          const prefill = existing ? String(existing.content || "") : "";
+          setEditor(id, { mode: "drive", driveId: existing ? existing.id : id, prefill });
+          break;
+        }
+
         let from = null;
         let example = false;
         for (let i = 1; i < args.length; i++) {
@@ -5299,11 +5567,16 @@ function handleCommand(inputText) {
           if (a.startsWith("--from=")) from = a.slice("--from=".length);
         }
 
+        const existingScript =
+          state.userScripts && state.userScripts[name] && typeof state.userScripts[name].code === "string"
+            ? String(state.userScripts[name].code)
+            : null;
+
         const template = example
           ? CHK_TEMPLATE_CODE
           : from
             ? readAnyText(from) || getLocFileText("home.hub", from)
-            : null;
+            : existingScript;
         if (!example && from && !template) {
           writeLine("Template not found.", "warn");
           writeLine("Tip: at home.hub: `cat chk.example`", "dim");
@@ -5327,7 +5600,7 @@ function handleCommand(inputText) {
         writeLine("Usage: connect <loc>", "warn");
         break;
       }
-      connectLoc(args[0]);
+      connectLoc(args[0], { autoBreach: flags.has("--breach") });
       storyChatTick();
       tutorialNextHint();
       break;
@@ -5665,9 +5938,41 @@ input.addEventListener("paste", (event) => {
 });
 
 // Don't steal focus when users are selecting/copying text from the terminal/chat.
+let selectingText = false;
+function hasTextSelection() {
+  try {
+    const sel = window.getSelection && window.getSelection();
+    return !!(sel && String(sel.toString() || "").length);
+  } catch {
+    return false;
+  }
+}
+
+document.addEventListener("mousedown", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  if (
+    target.closest("#screen") ||
+    target.closest("#chat") ||
+    target.closest("#scratch") ||
+    target.closest("#right")
+  ) {
+    selectingText = true;
+  }
+});
+document.addEventListener("mouseup", () => {
+  // Clear on next tick so click handlers can observe selection state.
+  window.setTimeout(() => {
+    selectingText = false;
+  }, 0);
+});
+
 document.addEventListener("click", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLElement)) return;
+
+  // If the user is selecting text (or has a selection), don't fight them.
+  if (selectingText || hasTextSelection()) return;
 
   // Allow selecting/clicking inside these panels without stealing focus.
   if (
@@ -5683,8 +5988,6 @@ document.addEventListener("click", (event) => {
     input.focus();
     return;
   }
-
-  if (target.closest("#shell") || target.closest("#layout")) input.focus();
 });
 setTimeout(() => input.focus(), 0);
 
