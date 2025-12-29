@@ -2119,9 +2119,13 @@ function getDriveEntry(ref) {
     .trim()
     .replace(/^drive:/i, "");
   if (!key) return null;
-  const e = state.drive && state.drive[key];
-  if (!e) return null;
-  return { id: key, ...e };
+  const drive = state.drive || {};
+  if (drive[key]) return { id: key, ...drive[key] };
+  // Case-insensitive fallback.
+  const lower = key.toLowerCase();
+  const found = Object.keys(drive).find((k) => k.toLowerCase() === lower);
+  if (!found) return null;
+  return { id: found, ...drive[found] };
 }
 
 function listDrive() {
@@ -2149,6 +2153,23 @@ function delCommand(args) {
     return;
   }
 
+  // Drive wildcards: del drive:public.exchange/*.log
+  if (/^drive:/i.test(target) && (target.includes("*") || target.includes("?"))) {
+    const pat = target.replace(/^drive:/i, "");
+    const re = globToRegex(pat);
+    const keys = Object.keys(state.drive || {});
+    const matches = keys.filter((k) => re.test(k));
+    if (!matches.length) {
+      writeLine("No drive matches.", "warn");
+      writeLine("Tip: `drive` to list stored files.", "dim");
+      return;
+    }
+    matches.forEach((k) => delete state.drive[k]);
+    writeLine(`deleted ${matches.length} drive file(s)`, "ok");
+    markDirty();
+    return;
+  }
+
   const drive = getDriveEntry(target);
   if (drive) {
     delete state.drive[drive.id];
@@ -2168,6 +2189,7 @@ function delCommand(args) {
 
   if (!state.userScripts || !state.userScripts[name]) {
     writeLine("Not a local script. Tip: you can only delete your own scripts.", "warn");
+    writeLine("Tip: for drive deletions, run `drive` then copy the exact `drive:...` id.", "dim");
     return;
   }
 
@@ -2735,7 +2757,14 @@ function hookUi() {
     scratchClear.addEventListener("click", () => {
       scratchPad.value = "";
       saveScratchToStorage();
-      chatSystem("scratch cleared");
+      // "System Clear" wipes scratch + chat (player request).
+      state.chat.log = [];
+      state.chat.channel = "#kernel";
+      state.chat.channels = new Set(["#kernel"]);
+      renderChat();
+      writeLine("sys::scratch cleared", "dim");
+      writeLine("sys::chat cleared", "dim");
+      markDirty();
     });
   }
   if (scratchPad) {
@@ -3017,12 +3046,7 @@ const TUTORIAL_STEPS = [
     hint: "Run `breach lattice.cache`, then `unlock SIGIL: LATTICE`, then `connect lattice.cache`.",
     check: () => state.unlocked.has("lattice.cache") && state.loc === "lattice.cache",
     onStart: () =>
-      chatPost({
-        channel: "#kernel",
-        from: "trust",
-        body: "lattice.cache waiting :: token + mark verified",
-        kind: "trust",
-      }),
+      writeLine("sys::trust lattice.cache waiting :: token + mark verified", "trust"),
   },
   {
     id: "t_audit",
@@ -3460,10 +3484,17 @@ function buildContext(currentScript, outputKind) {
 
 function runUserScript(script, args) {
   const ctx = buildContext(script, "dim");
+  let printed = 0;
+  const origPrint = ctx.print;
+  ctx.print = (msg) => {
+    printed += 1;
+    origPrint(msg);
+  };
   try {
     const fn = new Function("ctx", "args", `"use strict";\n${script.code}`);
     fn(ctx, args);
     state.flags.add("ran_user_script");
+    if (printed === 0) writeLine("Script complete (no output).", "dim");
   } catch (err) {
     writeLine(`Script error: ${err.message}`, "error");
     try {
@@ -4358,6 +4389,7 @@ function handleCommand(inputText) {
           writeLine("help del", "header");
           writeLine("Delete downloaded drive files or your local scripts.", "dim");
           writeLine("Delete a drive file: `del drive:sable.gate/cipher.txt`", "dim");
+          writeLine("Drive wildcards: `del drive:public.exchange/*.log`", "dim");
           writeLine("Delete your script: `del <your_handle>.chk --confirm`", "dim");
           break;
         }
@@ -4660,12 +4692,10 @@ function handleCommand(inputText) {
         writeLine("Type: restart --confirm", "warn");
         break;
       }
-      if (state.handle) {
-        chatPost({ channel: state.chat.channel, from: "sys", body: `*** ${state.handle} disconnected`, kind: "system" });
-      }
+      if (state.handle) writeLine(`sys::disconnect ${state.handle}`, "dim");
       localStorage.removeItem(SAVE_KEY);
       screen.innerHTML = "";
-      resetToFreshState(true);
+      resetToFreshState(false);
       writeLine("Restarted.", "ok");
       writeLine("Enter a handle to begin.", "dim");
       break;
