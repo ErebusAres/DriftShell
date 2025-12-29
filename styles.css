@@ -68,6 +68,25 @@ body.booting .line {
   text-align: center;
 }
 
+.line.boot {
+  font-family: Consolas, "Courier New", monospace;
+  letter-spacing: 0;
+  white-space: pre;
+  font-size: 14px;
+}
+
+.line.bootlogo {
+  text-align: center;
+}
+
+.line.bootlog {
+  text-align: left;
+  width: min(78ch, 100%);
+  margin-left: auto;
+  margin-right: auto;
+  opacity: 0.92;
+}
+
 /* Make selections visible and copy-friendly */
 #screen ::selection,
 #chat-log ::selection,

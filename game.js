@@ -230,33 +230,219 @@ function runBootSequence({ hasSave }) {
   clearBootTimers();
   screen.innerHTML = "";
 
-  const logo = [
-    " ____  ____  __  ______  _______  ____  ____  __  ",
-    "|  _ \\\\|  _ \\\\|  ||  ____||__   __||  _ \\\\|  _ \\\\|  | ",
-    "| | | | |_) |  || |__      | |   | |_) | |_) |  | ",
-    "| |_| |  _ <|  ||  __|     | |   |  _ <|  _ <|  | ",
-    "|____/|_| \\\\_\\\\__||_|        |_|   |_| \\\\_\\\\_| \\\\_\\\\__| ",
-    "            DRIFTSHELL :: DRIFT LOCAL",
+  // Rotating boot easter eggs (real pop-culture/game nods; short lines).
+  const EASTER_EGG_LINES = [
+    // cyberpunk / netrunning
+    "wake up, samurai...",
+    "night city ........ online",
+    "arasaka ........... watching",
+    "militech .......... probing",
+    "netrunner ......... jacked in",
+    "quickhack ......... queued",
+    "daemon ............ resident",
+    "daemon ............ sleeping",
+    "ice ............... detected",
+    "black ice ......... dormant",
+    "braindance ........ buffered",
+    "overclock ......... engaged",
+    "chrome ............ humming",
+    "edgerunner ........ steady",
+    "zero cool ......... (myth)",
+    "the gibson ........ humming",
+    "console cowboy .... online",
+    "neuromancer ....... page 1",
+    "snow crash ........ incoming",
+    "meatspace ......... ignored",
+
+    // hackmud (light nods, no lore claims)
+    "scripts.* ......... indexed",
+    "@sec .............. parsed",
+    "FULLSEC ........... greenlit",
+    "MIDSEC ............ shaky",
+    "LOWSEC ............ noisy",
+    "NULLSEC ........... void",
+    "trust ............. watching",
+    "trace ............. watchful",
+    "kernel ............ calm",
+    "uplink ............ listening",
+    "lattice ........... aligned",
+    "sigil ............. recognized",
+    "mark .............. accepted",
+    "gate .............. humming",
+    "perimeter ......... strict",
+    "exchange .......... loud",
+    "scratch ........... persistent",
+    "chat .............. connected",
+
+    // classic hacker / sci-fi staples
+    "hello, friend",
+    "follow the white rabbit",
+    "there is no spoon",
+    "wake up, neo",
+    "i know kung fu",
+    "matrix ............ green rain",
+    "ghost in the shell",
+    "blade runner ...... rain",
+    "replicant ......... baseline",
+    "system shock ...... warning",
+    "tron .............. lightcycle",
+    "skynet ............ (no)",
+    "hal ............... calm voice",
+    "stargate .......... dialing",
+    "alien ............. signal",
+    "the truth is out there",
+    "wintermute ........ ping",
+    "turing ............ test",
+    "basilisk .......... (avoid)",
+
+    // games / gaming culture
+    "the cake is a lie",
+    "aperture .......... (classified)",
+    "portal ............ calibrated",
+    "glados ............ awake",
+    "would you kindly",
+    "war never changes",
+    "hey, you. you're finally awake.",
+    "stay awhile and listen",
+    "a man chooses",
+    "no gods or kings. only man.",
+    "finish him",
+    "fatality .......... confirmed",
+    "hadouken .......... queued",
+    "all your base ...... belong to us",
+    "rise and shine",
+    "right man ......... wrong place",
+    "snake? snake!?",
+    "kept you waiting, huh?",
+    "do a barrel roll",
+    "the princess is in another castle",
+    "it's dangerous to go alone",
+    "you died",
+    "praise the sun",
+    "try finger but hole",
+    "git gud ........... (rude)",
+    "respawn ........... imminent",
+    "checkpoint ........ saved",
+    "new objective ...... unknown",
+    "sidequest .......... hidden",
+    "press start ....... (missing)",
+    "insert coin ....... (no slot)",
+    "continue? ......... y/n",
+
+    // hacker movies / shows
+    "would you like to play a game?",
+    "war games ......... nostalgia",
+    "hack the planet",
+    "mess with the best",
+    "acid burn ......... (offline)",
+    "mr. robot ......... (static)",
+    "fsociety .......... (quiet)",
+    "watchdogs ......... online",
+    "deus ex ........... augment",
+
+    // terminals / unix-y
+    "rm -rf ............ (tempting)",
+    "sudo .............. refused",
+    "grep .............. found",
+    "awk ............... yes",
+    "chmod ............. set",
+    "ssh ............... connected",
+    "telnet ............ (nostalgia)",
+    "vim ............... trapped",
+    "emacs ............. (too big)",
+    "cat ............... purring",
+    "ls ................ ok",
+    "ping .............. reply",
+    "localhost ......... home",
+    "permission denied",
+    "access granted",
+    "access denied",
+    "unauthorized ....... logged",
+    "retry ............. suggested",
+    "404 ............... not found",
+    "1337 .............. (lol)",
+    "0xDEAD ............ 0xBEEF",
+
+    // more short, real-adjacent cyber references
+    "handshake ......... accepted",
+    "key exchange ...... negotiated",
+    "proxy chain ....... 3 hops",
+    "tunnel ............ established",
+    "packet drift ...... within spec",
+    "null route ........ stable",
+    "buffer ............ flushed",
+    "stack canary ...... intact",
+    "syscall ........... permitted",
+    "entropy pool ...... high",
+    "signal ............ noise floor",
+    "checksum .......... verified",
+    "checksum .......... mismatch",
+    "cipher ............ rotated",
+    "cipher ............ decoded",
+    "payload ........... formed",
+    "payload ........... rejected",
+    "latency ........... acceptable",
+    "latency ........... spiking",
+    "bandwidth ......... thin",
+    "bandwidth ......... wide",
+    "boot sector ....... readable",
+    "disk .............. spinning",
+    "tape .............. rewinding",
+    "crt ............... warming",
+    "scanlines ......... stable",
+    "phosphor .......... glowing",
+    "drive array ....... online",
+    "modem ............. screaming",
+    "backbone .......... lit",
+
+    // extra nerdy nods (still short)
+    "open the pod bay doors",
+    "enhance ........... enhance",
+    "in the grim darkness",
+    "winter is coming",
+    "so say we all",
+    "live long and prosper",
+    "the spice must flow",
+    "this is fine",
+    "i'm in",
   ];
+  const easterEgg = EASTER_EGG_LINES[Math.floor(Math.random() * EASTER_EGG_LINES.length)];
+
+  const logo = [
+    "  _____   _____   _____  ______  _______  _____  _    _  ______  _       _      ",
+    " |  __ \\ |  __ \\ |_   _||  ____||__   __|/ ____|| |  | ||  ____|| |     | |     ",
+    " | |  | || |__) |  | |  | |__      | |  | (___  | |__| || |__   | |     | |     ",
+    " | |  | ||  _  /   | |  |  __|     | |   \\___ \\ |  __  ||  __|  | |     | |     ",
+    " | |__| || | \\ \\  _| |_ | |        | |   ____) || |  | || |____ | |____ | |____ ",
+    " |_____/ |_|  \\_\\|_____||_|        |_|  |_____/ |_|  |_||______||______||______|",
+    "                           DRIFTSHELL :: DRIFT LOCAL",
+  ];
+
+  // Print logo first, then boot lines under it.
+  const baseLogoAt = 120;
+  logo.forEach((line, idx) => scheduleBootLine(line, "boot bootlogo header", baseLogoAt + idx * 70));
+
+  const afterLogoAt = baseLogoAt + logo.length * 70 + 220;
+  scheduleBootLine(" ", "boot bootlogo dim", afterLogoAt - 120);
 
   const steps = [
-    { t: 0, kind: "dim", text: "BOOTSTRAP v0.9 :: drift-compatible" },
-    { t: 150, kind: "dim", text: "memchk ............ ok" },
-    { t: 280, kind: "dim", text: "ioctl  ............ ok" },
-    { t: 410, kind: "dim", text: "gpu   ............. ok" },
-    { t: 560, kind: "dim", text: "netlink DRIFT/LOCAL  ok" },
-    { t: 720, kind: "dim", text: "chatd ............. init" },
-    { t: 840, kind: "dim", text: hasSave ? "scratch ........... restore pending" : "scratch ........... ready" },
-    { t: 980, kind: "dim", text: "mount /shell ....... ok" },
+    { t: 0, kind: "boot bootlog dim", text: "BOOTSTRAP v0.9 :: drift-compatible" },
+    { t: 220, kind: "boot bootlog dim", text: "devsig ............ ErebusAres" },
+    { t: 430, kind: "boot bootlog dim", text: "memchk ............ ok" },
+    { t: 640, kind: "boot bootlog dim", text: "ioctl  ............ ok" },
+    { t: 860, kind: "boot bootlog dim", text: "gpu   ............. ok" },
+    { t: 1100, kind: "boot bootlog dim", text: "netlink DRIFT/LOCAL  ok" },
+    { t: 1320, kind: "boot bootlog dim", text: "chatd ............. init" },
+    { t: 1540, kind: "boot bootlog dim", text: hasSave ? "scratch ........... restoring session" : "scratch ........... ready" },
+    // Easter egg (random)
+    { t: 1760, kind: "boot bootlog dim", text: easterEgg },
+    { t: 1980, kind: "boot bootlog dim", text: "mount /shell ....... ok" },
+    { t: 2200, kind: "boot bootlog dim", text: "press any key to skip" },
   ];
 
-  // Print logo slightly after initial checks.
-  const baseLogoAt = 1150;
-  logo.forEach((line, idx) => scheduleBootLine(line, "header", baseLogoAt + idx * 55));
+  steps.forEach((s) => scheduleBootLine(s.text, s.kind, afterLogoAt + s.t));
 
-  steps.forEach((s) => scheduleBootLine(s.text, s.kind, s.t));
-
-  const doneAt = baseLogoAt + logo.length * 55 + 220;
+  const doneAt = afterLogoAt + 2550;
   const finish = () => {
     clearBootTimers();
     setBooting(false);
@@ -276,6 +462,7 @@ function runBootSequence({ hasSave }) {
     finish();
   };
   document.addEventListener("keydown", onSkip, { once: true });
+  return doneAt;
 }
 
 function siphonPayout(level) {
@@ -5362,7 +5549,7 @@ function boot() {
   renderChat();
 
   const hasSave = !!(localStorage.getItem(SAVE_KEY) || localStorage.getItem(LEGACY_SAVE_KEY));
-  runBootSequence({ hasSave });
+  const bootMs = runBootSequence({ hasSave });
 
   // Chat boot message (always), then restore indicator if applicable.
   chatSystem("chat initializing...");
@@ -5383,7 +5570,7 @@ function boot() {
     ensureDriveBackfill({ silent: true });
     ensureSiphonLoop();
     updateHud();
-  }, hasSave ? 1850 : 1650);
+  }, Math.max(0, (bootMs || 2200) + 150));
 }
 
 boot();
