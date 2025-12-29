@@ -2548,7 +2548,13 @@ function readFile(name) {
       writeLine(`Run: call ${script.owner}.${script.name}`, "dim");
       return;
     }
-    writeBlock(String(script.code || ""), "dim");
+    const code = String(script.code || "");
+    if (!code.trim()) {
+      writeLine("(script empty)", "warn");
+      writeLine("Tip: `edit " + script.name + "` then paste code, then `:wq`", "dim");
+      return;
+    }
+    writeBlock(code, "dim");
     return;
   }
   const entry = found.entry;
@@ -3998,6 +4004,11 @@ function finishEditor(save) {
     return raw;
   });
   const code = normalizedLines.join("\n");
+  if (!code.trim()) {
+    writeLine("Nothing to save (script empty).", "warn");
+    writeLine("Tip: `edit " + editor.name + "` then paste code; multi-line paste is supported.", "dim");
+    return;
+  }
   const match = code.match(/@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i);
   const sec = match ? match[1].toUpperCase() : "FULLSEC";
   state.userScripts[editor.name] = { owner: state.handle, name: editor.name, sec, code };
