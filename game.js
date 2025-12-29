@@ -767,6 +767,44 @@ function npcReply(npcId, body) {
   const msg = String(body || "").toLowerCase();
 
   if (npcId === "switchboard") {
+    if (msg.includes("chk") || msg.includes("checksum helper") || msg.includes("example")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body:
+          "If you want the slow, clean way: `edit chk` and write it line-by-line. If you want speed: `edit chk --example`.",
+      });
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body:
+          "Line 1: read the primer -> `const primer = ctx.read('primer.dat') || ''` (gets the payload text).",
+      });
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body:
+          "Line 2: extract payload -> find `payload=` and strip it (so you don't hardcode secrets).",
+      });
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body:
+          "Line 3: bind to YOU -> `text = payload + '|HANDLE=' + ctx.handle()` (locks are handle-dependent).",
+      });
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body:
+          "Line 4: compute + format -> `ctx.util.checksum(text)` then `ctx.util.hex3(sum)` then `ctx.print(out)`.",
+      });
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body: "Check your work any time: `cat " + (state.handle || "you") + ".chk`.",
+      });
+      return;
+    }
     if (msg.includes("checksum") || msg.includes("primer")) {
       chatPost({
         channel: dmChannel(npcId),
@@ -2087,6 +2125,47 @@ function listDrive() {
   if (keys.length > 40) writeLine("...", "dim");
 }
 
+function delCommand(args) {
+  const a = args || [];
+  const target = String(a[0] || "").trim();
+  if (!target) {
+    writeLine("Usage: del drive:<loc>/<file> | del <your_handle>.<script> [--confirm]", "warn");
+    return;
+  }
+
+  const drive = getDriveEntry(target);
+  if (drive) {
+    delete state.drive[drive.id];
+    writeLine(`deleted ${driveRef(drive.id)}`, "ok");
+    markDirty();
+    return;
+  }
+
+  const confirm = a.includes("--confirm");
+  const raw = target;
+  const prefix = `${state.handle}.`;
+  const name = raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
+  if (!name || name.includes("/") || name.includes(":")) {
+    writeLine("Unknown delete target.", "warn");
+    return;
+  }
+
+  if (!state.userScripts || !state.userScripts[name]) {
+    writeLine("Not a local script. Tip: you can only delete your own scripts.", "warn");
+    return;
+  }
+
+  if (!confirm) {
+    writeLine("Refusing to delete a script without confirmation.", "warn");
+    writeLine(`Run: del ${state.handle}.${name} --confirm`, "dim");
+    return;
+  }
+
+  delete state.userScripts[name];
+  writeLine(`deleted ${state.handle}.${name}`, "ok");
+  markDirty();
+}
+
 function ensureUploadsBucket(locName) {
   if (!state.uploads || typeof state.uploads !== "object") state.uploads = {};
   const cur = state.uploads[locName];
@@ -3338,13 +3417,17 @@ function buildContext(currentScript, outputKind) {
       return Object.keys((loc && loc.files) || {});
     },
     read: (name) => {
-      const loc = getLoc(state.loc);
-      const entry = loc && loc.files && loc.files[String(name || "").trim()];
-      if (!entry) return null;
-      if (entry.type === "text") return String(entry.content || "");
-      if (entry.type === "script") return String(entry.content || "");
-      if (entry.type === "item" || entry.type === "upgrade") return String(entry.content || "");
-      return null;
+      const key = String(name || "").trim();
+      if (!key) return null;
+
+      // Allow scripts to read from the local drive as well.
+      const drive = getDriveEntry(key);
+      if (drive) return String(drive.content || "");
+
+      // Default: current loc, with a fallback to home.hub so common primers work anywhere.
+      let text = getLocFileText(state.loc, key);
+      if (text === null) text = getLocFileText("home.hub", key);
+      return text === null ? null : String(text);
     },
     discover: (locs) => {
       const added = discover(locs || []);
@@ -4202,6 +4285,14 @@ function handleCommand(inputText) {
           break;
         }
 
+        if (topic === "del" || topic === "delete" || topic === "rm") {
+          writeLine("help del", "header");
+          writeLine("Delete downloaded drive files or your local scripts.", "dim");
+          writeLine("Delete a drive file: `del drive:sable.gate/cipher.txt`", "dim");
+          writeLine("Delete your script: `del <your_handle>.chk --confirm`", "dim");
+          break;
+        }
+
         if (topic === "drive") {
           writeLine("help drive", "header");
           writeLine("List downloaded text/cipher files: `drive`", "dim");
@@ -4392,6 +4483,9 @@ function handleCommand(inputText) {
       break;
     case "uploads":
       listUploads();
+      break;
+    case "del":
+      delCommand(args);
       break;
     case "inventory":
       listInventory();
@@ -4765,6 +4859,12 @@ function allDriveRefs() {
   return uniqueSorted(Object.keys(state.drive || {}).map((k) => driveRef(k)));
 }
 
+function allUserScriptRefs() {
+  const handle = String(state.handle || "").trim();
+  if (!handle) return [];
+  return uniqueSorted(Object.keys(state.userScripts || {}).map((n) => `${handle}.${n}`));
+}
+
 function allUploadSourceRefs() {
   const scripts = allScriptNames().filter((n) => !String(n).startsWith("scripts.trust"));
   return uniqueSorted([...allDriveRefs(), ...scripts]);
@@ -4795,6 +4895,7 @@ function allCommandNames() {
     "buy",
     "upload",
     "uploads",
+    "del",
     "inventory",
     "jobs",
     "turnin",
@@ -4854,6 +4955,8 @@ function completeInput() {
   } else if (cmd === "upload") {
     if (parts.length === 2) candidates = allUploadSourceRefs();
     else candidates = allLocNames();
+  } else if (cmd === "del") {
+    candidates = uniqueSorted([...allDriveRefs(), ...allUserScriptRefs()]);
   } else if (cmd === "decode") {
     candidates = ["rot13", "b64"];
   } else if (cmd === "install") {
