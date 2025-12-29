@@ -18,4 +18,5 @@ A local, single-player game inspired by hackmud's terminal aesthetic and script-
 - Use `breach <loc>` and `unlock <answer>` to clear lock stacks.
 - Use `decode rot13` / `decode b64` after reading cipher files.
 - Optional: once you find `relay.uplink`, you can `upload` scripts/files back into the net (and track them with `uploads`).
+- GC is currency: at `public.exchange`, use `store` / `buy <item>` then `install <upgrade>`.
 - Saves: autosave + `save` / `load` (browser localStorage), plus `export` / `import` for backups/cross-browser.

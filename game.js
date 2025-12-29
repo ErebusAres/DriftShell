@@ -29,6 +29,28 @@ const UPGRADE_DEFS = {
     },
     describe: "Reduces current TRACE by 2.",
   },
+  "upg.modem": {
+    name: "modem",
+    apply: () => {},
+    describe: "Improves download speed (~40% faster).",
+  },
+  "upg.backbone": {
+    name: "backbone",
+    apply: () => {},
+    describe: "Major download speed upgrade (~55% faster).",
+  },
+  "upg.drive_ext": {
+    name: "drive_ext",
+    apply: () => {
+      state.driveMax = Math.max(state.driveMax || 0, 80_000);
+    },
+    describe: "Expands drive capacity for downloaded text/cipher files.",
+  },
+  "upg.siphon": {
+    name: "siphon",
+    apply: () => {},
+    describe: "Enables an optional background GC siphon (risky).",
+  },
 };
 
 function secRank(level) {
@@ -73,6 +95,7 @@ let saveDirty = false;
 let autosaveTimer = null;
 let autosaveInterval = null;
 let lastAutosaveAt = 0;
+let siphonInterval = null;
 const AUTOSAVE_MIN_INTERVAL_MS = 15_000;
 const AUTOSAVE_FORCE_INTERVAL_MS = 60_000;
 const NON_DIRTY_COMMANDS = new Set([
@@ -155,6 +178,146 @@ function ensureAutosaveLoop() {
       saveState({ silent: true });
     } catch {}
   });
+}
+
+function siphonPayout(level) {
+  if (level === "high") return { gc: 10, heat: 12 };
+  if (level === "med") return { gc: 5, heat: 6 };
+  return { gc: 2, heat: 3 };
+}
+
+function getUploadedFile(locName, fileName) {
+  const loc = String(locName || "").trim();
+  const file = String(fileName || "").trim();
+  if (!loc || !file) return null;
+  const bucket = state.uploads && state.uploads[loc] && state.uploads[loc].files;
+  if (!bucket) return null;
+  const entry = bucket[file];
+  return entry ? { loc, file, ...entry } : null;
+}
+
+function parseSiphonScriptOutput(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const first = raw.split("\n")[0].trim();
+
+  // JSON: {"gc":2,"heat":3}
+  if (first.startsWith("{") && first.endsWith("}")) {
+    try {
+      const obj = JSON.parse(first);
+      const gc = Number(obj.gc);
+      const heat = Number(obj.heat);
+      if (!Number.isFinite(gc) || !Number.isFinite(heat)) return null;
+      return { gc, heat };
+    } catch {
+      return null;
+    }
+  }
+
+  // KV: gc=2 heat=3
+  const mGc = first.match(/\bgc\s*=\s*(-?\d+(\.\d+)?)\b/i);
+  const mHeat = first.match(/\bheat\s*=\s*(-?\d+(\.\d+)?)\b/i);
+  if (mGc || mHeat) {
+    const gc = mGc ? Number(mGc[1]) : NaN;
+    const heat = mHeat ? Number(mHeat[1]) : NaN;
+    if (!Number.isFinite(gc) || !Number.isFinite(heat)) return null;
+    return { gc, heat };
+  }
+
+  return null;
+}
+
+function runSiphonScript(code, args) {
+  const out = [];
+  const sandbox = {
+    print: (msg) => out.push(String(msg)),
+    scratch: () => {},
+    handle: () => String(state.handle || "ghost"),
+    util: {
+      checksum: (text) => checksumUtf8Mod4096(text),
+      hex3: (n) => hex3(n),
+    },
+    files: () => [],
+    read: () => null,
+    discover: () => {},
+    flag: () => {},
+    flagged: () => false,
+    addItem: () => {},
+    hasItem: () => false,
+    call: () => {},
+    loc: () => state.loc,
+  };
+
+  const fn = new Function("ctx", "args", `"use strict";\n${String(code || "")}`);
+  fn(sandbox, args || {});
+  return out.join("\n");
+}
+
+function ensureSiphonLoop() {
+  if (siphonInterval) {
+    window.clearInterval(siphonInterval);
+    siphonInterval = null;
+  }
+  if (!state.handle) return;
+  if (!state.upgrades.has("upg.siphon")) return;
+  if (!state.siphon || !state.siphon.on) return;
+
+  siphonInterval = window.setInterval(() => {
+    if (!state.handle) return;
+    if (!state.upgrades.has("upg.siphon")) return;
+    if (!state.siphon || !state.siphon.on) return;
+
+    const lvl = state.siphon.level || "low";
+    let payout = siphonPayout(lvl);
+
+    if (state.siphon.mode === "script" && state.siphon.source) {
+      const src = state.siphon.source;
+      const up = getUploadedFile(src.loc, src.file);
+      if (!up) {
+        writeLine("sys::siphon.script missing; disabled", "warn");
+        state.siphon.on = false;
+        ensureSiphonLoop();
+        markDirty();
+        return;
+      }
+      try {
+        const output = runSiphonScript(up.content, {
+          level: lvl,
+          heat: Number(state.siphon.heat) || 0,
+        });
+        const parsed = parseSiphonScriptOutput(output);
+        if (parsed) payout = parsed;
+      } catch (err) {
+        writeLine("sys::siphon.script error; disabled", "warn");
+        state.siphon.on = false;
+        ensureSiphonLoop();
+        markDirty();
+        return;
+      }
+    }
+
+    const gc = Math.max(0, Math.min(20, Math.floor(Number(payout.gc) || 0)));
+    const heat = Math.max(0, Math.min(30, Math.floor(Number(payout.heat) || 0)));
+    state.gc += gc;
+    state.siphon.heat = (Number(state.siphon.heat) || 0) + heat;
+
+    // Risk: too much heat triggers a TRACE spike.
+    const threshold = lvl === "high" ? 40 : lvl === "med" ? 60 : 90;
+    const jitterChance = lvl === "high" ? 0.22 : lvl === "med" ? 0.12 : 0.06;
+    if (state.siphon.heat >= threshold || Math.random() < jitterChance) {
+      state.siphon.heat = Math.max(0, state.siphon.heat - 35);
+      writeLine("sys::siphon.flagged TRACE +1", "warn");
+      failBreach();
+      chatPost({
+        channel: dmChannel("juniper"),
+        from: "juniper",
+        body: "Your siphon is loud. Dial it back or get cut loose.",
+      });
+    }
+
+    updateHud();
+    markDirty();
+  }, 15_000);
 }
 
 function downloadTextFile(filename, text) {
@@ -915,7 +1078,7 @@ function parseScriptArgs(tokens) {
 const state = {
   handle: null,
   loc: "home.hub",
-  gc: 420,
+  gc: 120,
   discovered: new Set(["home.hub", "training.node", "public.exchange", "sable.gate"]),
   unlocked: new Set(["home.hub", "public.exchange"]),
   inventory: new Set(),
@@ -928,6 +1091,10 @@ const state = {
   upgrades: new Set(),
   trace: 0,
   traceMax: 4,
+  driveMax: 12_000,
+  siphon: { on: false, level: "low", heat: 0, mode: "fixed", source: null },
+  lockoutUntil: 0,
+  wait: { lastAt: 0, streak: 0 },
   lastCipher: null,
   breach: null,
   editor: null,
@@ -958,6 +1125,7 @@ const MARKS = [
   { id: "mark.download", text: "Download a script from a loc" },
   { id: "mark.edit", text: "Create a script with edit" },
   { id: "mark.breach", text: "Breach a lock stack" },
+  { id: "mark.install", text: "Install an upgrade" },
 ];
 
 const LOCS = {
@@ -1760,6 +1928,91 @@ function listFiles() {
   });
 }
 
+const STORE_ITEMS = [
+  {
+    id: "upg.drive_ext",
+    price: 80,
+    when: () => true,
+    desc: "Drive expansion (store more downloaded text/ciphers).",
+  },
+  {
+    id: "upg.modem",
+    price: 160,
+    when: () => state.flags.has("trace_open"),
+    desc: "Faster downloads (reliable).",
+  },
+  {
+    id: "upg.coolant",
+    price: 60,
+    when: () => state.flags.has("trace_open"),
+    desc: "Reduce TRACE now (install to apply).",
+  },
+  {
+    id: "upg.siphon",
+    price: 220,
+    when: () => state.unlocked.has("sable.gate"),
+    desc: "Background GC trickle (risk of TRACE spikes).",
+  },
+  {
+    id: "upg.backbone",
+    price: 420,
+    when: () => state.unlocked.has("archives.arc"),
+    desc: "Serious download acceleration (expensive).",
+  },
+];
+
+function storeAvailable() {
+  return state.loc === "public.exchange";
+}
+
+function listStore() {
+  if (!storeAvailable()) {
+    writeLine("No store at this loc.", "warn");
+    writeLine("Tip: `connect public.exchange`", "dim");
+    return;
+  }
+  writeLine("JUNIPER//STORE", "header");
+  writeLine(`GC: ${state.gc}`, "dim");
+  STORE_ITEMS.filter((it) => (it.when ? it.when() : true)).forEach((it) => {
+    const owned = state.inventory.has(it.id) || state.upgrades.has(it.id);
+    const label = owned ? "[OWNED]" : state.gc >= it.price ? "[BUY]" : "[LOCKED]";
+    writeLine(`${label} ${it.id} :: ${it.price} GC`, "dim");
+    writeLine(`  ${it.desc}`, "dim");
+  });
+  writeLine("Buy: `buy <item>`", "dim");
+}
+
+function buyItem(id) {
+  if (!storeAvailable()) {
+    writeLine("No store at this loc.", "warn");
+    return;
+  }
+  const key = String(id || "").trim();
+  if (!key) {
+    writeLine("Usage: buy <item>", "warn");
+    return;
+  }
+  const item = STORE_ITEMS.find((it) => it.id.toLowerCase() === key.toLowerCase());
+  if (!item || (item.when && !item.when())) {
+    writeLine("Item not available.", "warn");
+    return;
+  }
+  if (state.inventory.has(item.id) || state.upgrades.has(item.id)) {
+    writeLine("Already owned.", "dim");
+    return;
+  }
+  if (state.gc < item.price) {
+    writeLine("Insufficient GC.", "warn");
+    return;
+  }
+  state.gc -= item.price;
+  state.inventory.add(item.id);
+  writeLine(`Purchased ${item.id} (-${item.price} GC)`, "ok");
+  writeLine("Tip: `install " + item.id + "`", "dim");
+  markDirty();
+  updateHud();
+}
+
 function globToRegex(glob) {
   // Simple glob: * and ? only.
   const escaped = String(glob)
@@ -1790,6 +2043,15 @@ function entrySize(entry) {
   return content.length;
 }
 
+function driveBytesUsed() {
+  const entries = Object.values(state.drive || {});
+  let total = 0;
+  entries.forEach((e) => {
+    total += new TextEncoder().encode(String((e && e.content) || "")).length;
+  });
+  return total;
+}
+
 function driveId(locName, fileName) {
   return `${locName}/${fileName}`;
 }
@@ -1816,6 +2078,7 @@ function listDrive() {
     writeLine("Tip: `download cipher.txt` then `cat drive:sable.gate/cipher.txt`", "dim");
     return;
   }
+  writeLine(`capacity: ${driveBytesUsed()}/${state.driveMax} bytes`, "dim");
   keys.slice(0, 40).forEach((k) => {
     const e = state.drive[k];
     const bytes = new TextEncoder().encode(String((e && e.content) || "")).length;
@@ -1894,6 +2157,10 @@ function resolveUploadSource(source) {
 }
 
 function uploadCommand(args) {
+  if (state.lockoutUntil && Date.now() < state.lockoutUntil) {
+    writeLine("CONNECTION THROTTLED. WAIT.", "warn");
+    return;
+  }
   const a = args || [];
   const source = a[0];
   if (!source) {
@@ -2000,10 +2267,12 @@ function startNextDownloadIfIdle() {
   const loc = getLoc(next.loc);
   const entry = loc.files[next.file];
   const size = entrySize(entry);
-  const base = 220;
+  const base = 520;
   const scaled = Math.floor(size / 22);
   const jitter = Math.floor(Math.random() * 140);
-  const durationMs = Math.max(260, Math.min(2200, base + scaled + jitter));
+  let durationMs = Math.max(520, Math.min(4200, base + scaled + jitter));
+  if (state.upgrades.has("upg.modem")) durationMs = Math.floor(durationMs * 0.6);
+  if (state.upgrades.has("upg.backbone")) durationMs = Math.floor(durationMs * 0.45);
 
   state.downloads.active = {
     loc: next.loc,
@@ -2056,6 +2325,13 @@ function completeActiveDownload() {
     writeLine(`download complete: ${active.file} -> kit.${entry.script.name}`, "ok");
     state.marks.add("mark.download");
   } else if (entry.type === "text") {
+    const bytes = new TextEncoder().encode(String(entry.content || "")).length;
+    if (driveBytesUsed() + bytes > state.driveMax) {
+      writeLine("download failed: drive full", "error");
+      writeLine("Tip: buy `upg.drive_ext` at the exchange (store), or delete saves / restart.", "dim");
+      startNextDownloadIfIdle();
+      return;
+    }
     const id = driveId(active.loc, active.file);
     state.drive[id] = {
       loc: active.loc,
@@ -2209,14 +2485,154 @@ function installUpgrade(itemId) {
   state.upgrades.add(key);
   writeLine(`Installed ${key}`, "ok");
   writeLine(def.describe, "dim");
+  if (key === "upg.siphon") {
+    writeLine("Tip: `siphon on` then `siphon set low|med|high`", "dim");
+  }
+  setMark("mark.install");
+  markDirty();
   updateHud();
 }
 
 function waitTick() {
-  if (state.trace > 0) state.trace -= 1;
+  const now = Date.now();
+  if (!state.wait || typeof state.wait !== "object") state.wait = { lastAt: 0, streak: 0 };
+
+  const since = now - (Number(state.wait.lastAt) || 0);
+  const fast = since < 2200;
+  state.wait.lastAt = now;
+  state.wait.streak = fast ? (Number(state.wait.streak) || 0) + 1 : 0;
+
   writeLine("...waiting...", "dim");
-  if (state.trace === 0) writeLine("trace is cold", "ok");
-  storyChatTick();
+
+  if (!fast) {
+    if (state.trace > 0) state.trace -= 1;
+    if (state.trace === 0) writeLine("trace is cold", "ok");
+    storyChatTick();
+    markDirty();
+    return;
+  }
+
+  writeLine("still hot (don't spam wait)", "warn");
+  // Light punishment: repeated spam can raise trace a bit.
+  if (state.wait.streak >= 3 && Math.random() < 0.35) {
+    writeLine("passive scan catches movement", "warn");
+    failBreach();
+  }
+}
+
+function siphonStatus() {
+  writeLine("SIPHON", "header");
+  if (!state.upgrades.has("upg.siphon")) {
+    writeLine("not installed", "dim");
+    writeLine("Tip: store -> buy upg.siphon, then `install upg.siphon`", "dim");
+    return;
+  }
+  writeLine(`state: ${state.siphon && state.siphon.on ? "ON" : "OFF"}`, "dim");
+  writeLine(`level: ${(state.siphon && state.siphon.level) || "low"}`, "dim");
+  writeLine(`heat: ${Number((state.siphon && state.siphon.heat) || 0)}`, "dim");
+  const mode = (state.siphon && state.siphon.mode) || "fixed";
+  writeLine(`mode: ${mode}`, "dim");
+  if (mode === "script" && state.siphon && state.siphon.source) {
+    writeLine(`script: ${state.siphon.source.loc}:${state.siphon.source.file}`, "dim");
+  }
+  writeLine("Commands:", "dim");
+  writeLine("  siphon on | siphon off | siphon set low|med|high", "dim");
+  writeLine("  siphon use <loc:file>   (use an uploaded script for payout)", "dim");
+  writeLine("  siphon clear            (back to fixed payout)", "dim");
+}
+
+function siphonCommand(args) {
+  const a0 = String((args && args[0]) || "").toLowerCase();
+  if (!a0 || a0 === "status") {
+    siphonStatus();
+    return;
+  }
+  if (!state.upgrades.has("upg.siphon")) {
+    writeLine("Siphon not installed.", "warn");
+    return;
+  }
+  if (!state.siphon || typeof state.siphon !== "object") {
+    state.siphon = { on: false, level: "low", heat: 0, mode: "fixed", source: null };
+  }
+
+  if (a0 === "on") {
+    state.siphon.on = true;
+    writeLine("siphon enabled", "ok");
+    ensureSiphonLoop();
+    markDirty();
+    return;
+  }
+  if (a0 === "off") {
+    state.siphon.on = false;
+    writeLine("siphon disabled", "dim");
+    ensureSiphonLoop();
+    markDirty();
+    return;
+  }
+  if (a0 === "set") {
+    const lvl = String((args && args[1]) || "").toLowerCase();
+    if (!["low", "med", "high"].includes(lvl)) {
+      writeLine("Usage: siphon set low|med|high", "warn");
+      return;
+    }
+    state.siphon.level = lvl;
+    writeLine("siphon level set: " + lvl, "ok");
+    ensureSiphonLoop();
+    markDirty();
+    return;
+  }
+
+  if (a0 === "use") {
+    const target = String((args && args[1]) || "").trim();
+    if (!target || !target.includes(":")) {
+      writeLine("Usage: siphon use <loc:file>", "warn");
+      writeLine("Tip: upload a script first: `upload <you>.siphon relay.uplink:siphon.s`", "dim");
+      return;
+    }
+    const [loc, file] = target.split(":", 2).map((s) => String(s || "").trim());
+    const up = getUploadedFile(loc, file);
+    if (!up) {
+      writeLine("No uploaded file at that target.", "warn");
+      writeLine("Tip: `uploads` to see what you pushed.", "dim");
+      return;
+    }
+    if (up.kind !== "script") {
+      writeLine("That upload isn't marked as a script, but I'll try to run it anyway.", "warn");
+    }
+    try {
+      const output = runSiphonScript(up.content, {
+        level: state.siphon.level || "low",
+        heat: Number(state.siphon.heat) || 0,
+      });
+      const parsed = parseSiphonScriptOutput(output);
+      if (!parsed) {
+        writeLine("Script did not return a payout line.", "warn");
+        writeLine("Expected: `ctx.print('gc=2 heat=3')` or JSON `{ \"gc\":2, \"heat\":3 }`", "dim");
+        return;
+      }
+    } catch (err) {
+      writeLine("Script failed to run: " + (err && err.message ? err.message : "error"), "error");
+      return;
+    }
+
+    state.siphon.mode = "script";
+    state.siphon.source = { loc, file };
+    writeLine(`siphon script set: ${loc}:${file}`, "ok");
+    ensureSiphonLoop();
+    markDirty();
+    return;
+  }
+
+  if (a0 === "clear") {
+    state.siphon.mode = "fixed";
+    state.siphon.source = null;
+    writeLine("siphon script cleared", "dim");
+    ensureSiphonLoop();
+    markDirty();
+    return;
+  }
+
+  writeLine("Usage: siphon on|off|set low|med|high|status", "warn");
 }
 
 function hookUi() {
@@ -2250,7 +2666,7 @@ function resetToFreshState(keepChat) {
   const priorChat = keepChat ? state.chat : null;
   state.handle = null;
   state.loc = "home.hub";
-  state.gc = 420;
+  state.gc = 120;
   state.discovered = new Set(["home.hub", "training.node", "public.exchange", "sable.gate"]);
   state.unlocked = new Set(["home.hub", "public.exchange"]);
   state.inventory = new Set();
@@ -2263,6 +2679,10 @@ function resetToFreshState(keepChat) {
   state.upgrades = new Set();
   state.trace = 0;
   state.traceMax = 4;
+  state.driveMax = 12_000;
+  state.siphon = { on: false, level: "low", heat: 0, mode: "fixed", source: null };
+  state.lockoutUntil = 0;
+  state.wait = { lastAt: 0, streak: 0 };
   state.lastCipher = null;
   state.breach = null;
   state.editor = null;
@@ -2629,6 +3049,9 @@ function listInventory() {
   }
   if (state.inventory.size) {
     writeLine("Items: " + Array.from(state.inventory).sort().join(", "), "dim");
+  }
+  if (state.upgrades && state.upgrades.size) {
+    writeLine("Installed: " + Array.from(state.upgrades).sort().join(", "), "dim");
   }
   if (Object.keys(state.kit).length) {
     writeLine("Kit: " + Object.keys(state.kit).sort().join(", "), "dim");
@@ -3163,6 +3586,10 @@ function canAttemptLoc(locName) {
 }
 
 function startBreach(locName) {
+  if (state.lockoutUntil && Date.now() < state.lockoutUntil) {
+    writeLine("CONNECTION THROTTLED. WAIT.", "warn");
+    return;
+  }
   // Clear any prior breach pressure loop.
   if (state.breach && state.breach.pressure) {
     try {
@@ -3218,10 +3645,40 @@ function failBreach() {
   state.trace += 1;
   if (state.trace >= state.traceMax) {
     writeLine("TRACE LIMIT HIT. CONNECTION DROPPED.", "error");
+
+    // Game-ified penalty: you get kicked, downloads are dropped, and you eat a small fine.
+    try {
+      if (state.downloads && state.downloads.active) {
+        if (state.downloads.active.tick) window.clearInterval(state.downloads.active.tick);
+        if (state.downloads.active.timer) window.clearTimeout(state.downloads.active.timer);
+      }
+    } catch {}
+    state.downloads = { active: null, queue: [] };
+
+    const fine = Math.min(50, Math.max(0, Number(state.gc) || 0));
+    if (fine > 0) {
+      state.gc -= fine;
+      writeLine(`sys::audit.fine -${fine}GC`, "warn");
+    }
+
+    if (state.siphon && state.siphon.on) {
+      state.siphon.on = false;
+      state.siphon.heat = Math.max(0, (Number(state.siphon.heat) || 0) - 25);
+      ensureSiphonLoop();
+      chatPost({
+        channel: dmChannel("juniper"),
+        from: "juniper",
+        body: "You got flagged. Siphon disabled. Next time you pay more than GC.",
+      });
+    }
+
+    state.lockoutUntil = Date.now() + 9000;
     state.loc = "home.hub";
     state.trace = 0;
     state.breach = null;
     showLoc();
+    updateHud();
+    markDirty();
     return;
   }
   writeLine(`TRACE +1 (${state.trace}/${state.traceMax})`, "warn");
@@ -3381,6 +3838,10 @@ function getSaveData() {
     flags: Array.from(state.flags),
     marks: Array.from(state.marks),
     upgrades: Array.from(state.upgrades),
+    driveMax: state.driveMax,
+    siphon: state.siphon,
+    lockoutUntil: state.lockoutUntil,
+    wait: state.wait,
     tutorial: {
       enabled: state.tutorial.enabled,
       stepIndex: state.tutorial.stepIndex,
@@ -3433,6 +3894,28 @@ function loadState(options) {
   state.flags = new Set(data.flags || []);
   state.marks = new Set(data.marks || []);
   state.upgrades = new Set(data.upgrades || []);
+  state.driveMax = Number(data.driveMax) > 0 ? Number(data.driveMax) : state.driveMax || 12_000;
+  state.siphon =
+    data.siphon && typeof data.siphon === "object"
+      ? {
+          on: !!data.siphon.on,
+          level: ["low", "med", "high"].includes(String(data.siphon.level)) ? String(data.siphon.level) : "low",
+          heat: Number(data.siphon.heat) || 0,
+          mode: String(data.siphon.mode) === "script" ? "script" : "fixed",
+          source:
+            data.siphon.source && typeof data.siphon.source === "object"
+              ? {
+                  loc: String(data.siphon.source.loc || ""),
+                  file: String(data.siphon.source.file || ""),
+                }
+              : null,
+        }
+      : state.siphon || { on: false, level: "low", heat: 0, mode: "fixed", source: null };
+  state.lockoutUntil = Number(data.lockoutUntil) || 0;
+  state.wait =
+    data.wait && typeof data.wait === "object"
+      ? { lastAt: Number(data.wait.lastAt) || 0, streak: Number(data.wait.streak) || 0 }
+      : state.wait || { lastAt: 0, streak: 0 };
   if (data.tutorial) {
     state.tutorial.enabled = data.tutorial.enabled !== false;
     state.tutorial.completed = new Set(data.tutorial.completed || []);
@@ -3472,6 +3955,7 @@ function loadState(options) {
   showLoc();
   storyChatTick();
   tutorialAdvance();
+  ensureSiphonLoop();
   // If we loaded from legacy key, persist in the new namespace.
   if (localStorage.getItem(SAVE_KEY) === null) localStorage.setItem(SAVE_KEY, JSON.stringify(JSON.parse(raw)));
   saveDirty = false;
@@ -3645,6 +4129,7 @@ function handleCommand(inputText) {
     tutorialPrint();
     updateHud();
     ensureAutosaveLoop();
+    ensureSiphonLoop();
     markDirty();
     autoSaveNow();
     return;
@@ -3735,6 +4220,26 @@ function handleCommand(inputText) {
           break;
         }
 
+        if (topic === "store" || topic === "buy") {
+          writeLine("help store", "header");
+          writeLine("Juniper sells upgrades at the exchange.", "dim");
+          writeLine("List: `store` (only at public.exchange)", "dim");
+          writeLine("Buy: `buy upg.modem`", "dim");
+          writeLine("Install: `install upg.modem`", "dim");
+          break;
+        }
+
+        if (topic === "siphon") {
+          writeLine("help siphon", "header");
+          writeLine("Optional passive GC income (risky). Requires `install upg.siphon`.", "dim");
+          writeLine("Status: `siphon`", "dim");
+          writeLine("Enable/disable: `siphon on` / `siphon off`", "dim");
+          writeLine("Intensity: `siphon set low|med|high` (higher = more GC + more risk)", "dim");
+          writeLine("Scripted payout: upload a script, then `siphon use relay.uplink:siphon.s`", "dim");
+          writeLine("Script output: `ctx.print('gc=2 heat=3')` or `ctx.print(JSON.stringify({gc:2,heat:3}))`", "dim");
+          break;
+        }
+
         if (topic === "breach") {
           writeLine("help breach", "header");
           writeLine("Start: `breach sable.gate`", "dim");
@@ -3764,6 +4269,7 @@ function handleCommand(inputText) {
           "  breach <loc> | unlock <answer> | wait",
           "  ls | cat <file> | download <file|glob> | downloads",
           "  drive | upload <src> [loc|file|loc:file] [file] | uploads",
+          "  store | buy <item> | install <upgrade> | siphon ...",
           "  scripts | call <script> [args] | edit <name> | decode rot13|b64 [text]",
           "  say <text> | join #chan | switch #chan | channels | tell <npc> <msg>",
           "  inventory | install <upgrade> | marks | jobs | turnin <mask|token>",
@@ -3875,6 +4381,12 @@ function handleCommand(inputText) {
     case "drive":
       listDrive();
       break;
+    case "store":
+      listStore();
+      break;
+    case "buy":
+      buyItem(args[0]);
+      break;
     case "upload":
       uploadCommand(args);
       break;
@@ -3892,6 +4404,15 @@ function handleCommand(inputText) {
       break;
     case "diagnose":
       diagnoseProgress();
+      break;
+    case "store":
+      listStore();
+      break;
+    case "buy":
+      buyItem(args[0]);
+      break;
+    case "siphon":
+      siphonCommand(args);
       break;
     case "stabilize":
       setCorruption(false);
@@ -3928,6 +4449,9 @@ function handleCommand(inputText) {
       break;
     case "install":
       installUpgrade(args[0]);
+      break;
+    case "siphon":
+      siphonCommand(args);
       break;
     case "wait":
       waitTick();
@@ -4267,6 +4791,8 @@ function allCommandNames() {
     "download",
     "downloads",
     "drive",
+    "store",
+    "buy",
     "upload",
     "uploads",
     "inventory",
@@ -4275,6 +4801,7 @@ function allCommandNames() {
     "diagnose",
     "decode",
     "marks",
+    "siphon",
     "say",
     "join",
     "switch",
@@ -4381,6 +4908,7 @@ function boot() {
     writeLine("Tip: type `restart --confirm` to start over.", "dim");
     tutorialAdvance();
   }
+  ensureSiphonLoop();
   updateHud();
 }
 
