@@ -2455,6 +2455,12 @@ function driveTreeLine(prefix, name, suffix) {
   return `${left}  ${suffix}`;
 }
 
+function fileBaseName(path) {
+  const raw = String(path || "");
+  const idx = raw.lastIndexOf("/");
+  return idx === -1 ? raw : raw.slice(idx + 1);
+}
+
 function getDriveEntry(ref) {
   const key = String(ref || "")
     .trim()
@@ -2495,7 +2501,7 @@ function driveTree() {
 
   writeLine("DRIVE", "header");
   writeLine(`usage: ${used}/${max} bytes (${pct}%)`, "dim");
-  writeLine("drive:/", "dim");
+  writeLine("drive:/  (local)", "dim");
 
   if (!keys.length) {
     writeLine("|-- (empty)", "dim");
@@ -2503,71 +2509,64 @@ function driveTree() {
     return;
   }
 
-  const byLoc = new Map(); // loc -> { type -> [{file, bytes}] }
+  const byType = new Map(); // type -> [{ id, file, bytes }]
   keys.forEach((id) => {
-    const parts = String(id).split("/");
-    const loc = parts[0] || "unknown";
-    const file = parts.slice(1).join("/") || "unknown";
+    const file = fileBaseName(id) || "unknown";
     const e = state.drive[id];
     const type = e && e.type ? String(e.type) : "file";
     const bytes = driveBytesForContent((e && e.content) || "");
-    if (!byLoc.has(loc)) byLoc.set(loc, new Map());
-    const typeMap = byLoc.get(loc);
-    if (!typeMap.has(type)) typeMap.set(type, []);
-    typeMap.get(type).push({ file, bytes, id });
+    if (!byType.has(type)) byType.set(type, []);
+    byType.get(type).push({ id, file, bytes });
   });
 
-  const locs = Array.from(byLoc.keys()).sort((a, b) => a.localeCompare(b));
   const typeOrder = ["script", "text", "item", "upgrade", "file"];
 
-  locs.forEach((loc, locIdx) => {
-    const lastLoc = locIdx === locs.length - 1;
-    const locPrefix = lastLoc ? "`-- " : "|-- ";
-    writeLine(driveTreeLine(locPrefix, `${loc}/`, ""), "dim");
-
-    const typeMap = byLoc.get(loc);
-    const types = Array.from(typeMap.keys()).sort((a, b) => {
-      const ia = typeOrder.indexOf(a);
-      const ib = typeOrder.indexOf(b);
-      if (ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
-      return a.localeCompare(b);
-    });
-
-    types.forEach((t, typeIdx) => {
-      const lastType = typeIdx === types.length - 1;
-      const branch = lastLoc ? "    " : "|   ";
-      const typePrefix = branch + (lastType ? "`-- " : "|-- ");
-      const label =
-        t === "script"
-          ? "Scripts"
-          : t === "text"
-            ? "Text"
-            : t === "item"
-              ? "Items"
-              : t === "upgrade"
-                ? "Upgrades"
-                : "Files";
-
-      const list = typeMap.get(t).slice().sort((a, b) => a.file.localeCompare(b.file));
-      const count = list.length;
-      const totalBytes = list.reduce((acc, x) => acc + x.bytes, 0);
-      writeLine(driveTreeLine(typePrefix, `${label}/`, `(${count}, ${formatBytesShort(totalBytes)})`), "dim");
-
-      const fileBranch = branch + (lastType ? "    " : "|   ");
-      const show = list.slice(0, 14);
-      show.forEach((x, i) => {
-        const lastFile = i === show.length - 1 && count <= show.length;
-        const filePrefix = fileBranch + (lastFile ? "`-- " : "|-- ");
-        writeLine(driveTreeLine(filePrefix, x.file, `(${formatBytesShort(x.bytes)})`), "dim");
-      });
-      if (count > show.length) {
-        writeLine(fileBranch + "`-- " + `... (+${count - show.length} more)`, "dim");
-      }
-    });
+  const types = Array.from(byType.keys()).sort((a, b) => {
+    const ia = typeOrder.indexOf(a);
+    const ib = typeOrder.indexOf(b);
+    if (ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+    return a.localeCompare(b);
   });
 
-  writeLine("Tip: use `cat drive:<loc>/<file>` to read, and `del drive:<loc>/<file>` to delete.", "dim");
-  writeLine("Tip: `drive ls` for a flat list of full drive refs.", "dim");
+  types.forEach((t, idx) => {
+    const lastType = idx === types.length - 1;
+    const typePrefix = lastType ? "`-- " : "|-- ";
+    const label =
+      t === "script"
+        ? "Scripts"
+        : t === "text"
+          ? "Text"
+          : t === "item"
+            ? "Items"
+            : t === "upgrade"
+              ? "Upgrades"
+              : "Files";
+
+    const list = byType.get(t).slice();
+    const count = list.length;
+    const totalBytes = list.reduce((acc, x) => acc + x.bytes, 0);
+    writeLine(driveTreeLine(typePrefix, `${label}/`, `(${count}, ${formatBytesShort(totalBytes)})`), "dim");
+
+    const nameCounts = new Map();
+    list.forEach((x) => nameCounts.set(x.file.toLowerCase(), (nameCounts.get(x.file.toLowerCase()) || 0) + 1));
+
+    list.sort((a, b) => a.file.localeCompare(b.file));
+    const show = list.slice(0, 14);
+    const branch = lastType ? "    " : "|   ";
+    show.forEach((x, i) => {
+      const lastFile = i === show.length - 1 && count <= show.length;
+      const filePrefix = branch + (lastFile ? "`-- " : "|-- ");
+      const dup = (nameCounts.get(x.file.toLowerCase()) || 0) > 1;
+      const suffix = dup ? `${formatBytesShort(x.bytes)} (dup)` : formatBytesShort(x.bytes);
+      writeLine(driveTreeLine(filePrefix, x.file, `(${suffix})`), "dim");
+    });
+    if (count > show.length) {
+      writeLine(branch + "`-- " + `... (+${count - show.length} more)`, "dim");
+    }
+  });
+
+  writeLine("Tip: `drive ls` shows full `drive:...` refs for `cat`/`del`.", "dim");
+  writeLine("Tip: `history` shows where files came from.", "dim");
 }
 
 function driveCommand(args) {
@@ -2623,9 +2622,24 @@ function listHistory(args) {
       }
       const bytes = driveBytesForContent((drive && drive.content) || "");
       const type = drive && drive.type ? String(drive.type) : "file";
-      writeLine(`${driveRef(drive.id)}  (${type}, ${bytes} bytes)`, "dim");
+      const origin = String(drive.loc || "").trim();
+      const originTitle = (getLoc(origin) && getLoc(origin).title) ? String(getLoc(origin).title) : "UNKNOWN";
+      const file = fileBaseName(drive.id) || String(drive.name || "file");
+      writeLine(`${file}  <= ${origin} :: ${originTitle}  [${driveRef(drive.id)}]  (${type}, ${formatBytesShort(bytes)})`, "dim");
       return;
     }
+
+    // Loc file refs we track as "loc/file"
+    if (v.includes("/") && !v.includes("://")) {
+      const parts = v.split("/");
+      const loc = parts[0];
+      const file = parts.slice(1).join("/");
+      const node = getLoc(loc);
+      const title = node && node.title ? String(node.title) : "UNKNOWN";
+      writeLine(`${file}  <= ${loc} :: ${title}`, "dim");
+      return;
+    }
+
     writeLine(v, "dim");
   });
 
