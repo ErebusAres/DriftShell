@@ -11,6 +11,9 @@ const LEGACY_SCRATCH_KEY_PREFIX = "hackterm_scratch_v1:";
 
 const SAVE_KEY = `${GAME_ID}_save_v1`;
 const BRIEF_SEEN_KEY = `${GAME_ID}_brief_seen_v1`;
+const LOCAL_FOLDER_DB = `${GAME_ID}_local_folder_v1`;
+const LOCAL_FOLDER_STORE = "handles";
+const LOCAL_FOLDER_KEY = "scriptsFolder";
 const SEC_LEVELS = ["NULLSEC", "LOWSEC", "MIDSEC", "HIGHSEC", "FULLSEC"];
 // Drive capacity is an in-world abstraction of browser localStorage limits.
 // Keep it comfortably below typical per-origin quotas (~5MB).
@@ -122,6 +125,11 @@ const chatChannelLabel = document.getElementById("chat-channel");
 const scratchPad = document.getElementById("scratch-pad");
 const scratchClear = document.getElementById("scratch-clear");
 const quickLinks = document.getElementById("quick-links");
+const localFolderStatus = document.getElementById("local-folder-status");
+const localFolderPick = document.getElementById("local-folder-pick");
+const localFolderSync = document.getElementById("local-folder-sync");
+const localFolderMirror = document.getElementById("local-folder-mirror");
+const localFolderForget = document.getElementById("local-folder-forget");
 
 let saveDirty = false;
 let autosaveTimer = null;
@@ -130,6 +138,7 @@ let lastAutosaveAt = 0;
 let siphonInterval = null;
 let booting = false;
 let bootTimers = [];
+let localFolderHandle = null;
 const AUTOSAVE_MIN_INTERVAL_MS = 15_000;
 const AUTOSAVE_FORCE_INTERVAL_MS = 60_000;
 const NON_DIRTY_COMMANDS = new Set([
@@ -138,6 +147,7 @@ const NON_DIRTY_COMMANDS = new Set([
   "ls",
   "downloads",
   "drive",
+  "folder",
   "uploads",
   "inventory",
   "channels",
@@ -689,6 +699,303 @@ const importPicker =
         return el;
       })()
     : null;
+
+function supportsLocalFolder() {
+  return typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
+}
+
+function localFolderGuard() {
+  if (!supportsLocalFolder()) {
+    writeLine("Local folder sync requires a Chromium-based browser (Chrome/Edge/Brave).", "warn");
+    return false;
+  }
+  if (!window.isSecureContext) {
+    writeLine("Local folder sync requires https or localhost.", "warn");
+    return false;
+  }
+  return true;
+}
+
+function setLocalFolderStatus(text, kind) {
+  if (!localFolderStatus) return;
+  localFolderStatus.textContent = text;
+  localFolderStatus.classList.remove("ok", "warn", "dim");
+  localFolderStatus.classList.add(kind || "dim");
+}
+
+function setLocalFolderControls({ supported, hasHandle }) {
+  if (localFolderPick) localFolderPick.disabled = !supported;
+  if (localFolderSync) localFolderSync.disabled = !supported || !hasHandle;
+  if (localFolderForget) localFolderForget.disabled = !supported || !hasHandle;
+  if (localFolderMirror) {
+    localFolderMirror.disabled = !supported || !hasHandle;
+    localFolderMirror.checked = !!(state.localSync && state.localSync.mirror);
+  }
+}
+
+async function refreshLocalFolderUi() {
+  if (!supportsLocalFolder()) {
+    setLocalFolderControls({ supported: false, hasHandle: false });
+    setLocalFolderStatus("Local sync needs Chromium (Chrome/Edge/Brave).", "warn");
+    return;
+  }
+  if (!window.isSecureContext) {
+    setLocalFolderControls({ supported: false, hasHandle: false });
+    setLocalFolderStatus("Local sync requires https or localhost.", "warn");
+    return;
+  }
+  const hasHandle = !!localFolderHandle;
+  setLocalFolderControls({ supported: true, hasHandle });
+  if (!hasHandle) {
+    setLocalFolderStatus("Local folder not set.", "dim");
+    return;
+  }
+  try {
+    const perm = await localFolderHandle.queryPermission({ mode: "readwrite" });
+    if (perm === "granted") {
+      setLocalFolderStatus("Local folder connected.", "ok");
+    } else if (perm === "prompt") {
+      setLocalFolderStatus("Local folder permission required.", "warn");
+    } else {
+      setLocalFolderStatus("Local folder permission denied.", "warn");
+    }
+  } catch {
+    setLocalFolderStatus("Local folder status unknown.", "warn");
+  }
+}
+
+function openLocalFolderDb() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("IndexedDB unavailable"));
+      return;
+    }
+    const req = indexedDB.open(LOCAL_FOLDER_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(LOCAL_FOLDER_STORE)) {
+        db.createObjectStore(LOCAL_FOLDER_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("IndexedDB error"));
+  });
+}
+
+async function localFolderDbGet() {
+  const db = await openLocalFolderDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(LOCAL_FOLDER_STORE, "readonly");
+    const store = tx.objectStore(LOCAL_FOLDER_STORE);
+    const req = store.get(LOCAL_FOLDER_KEY);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error || new Error("IndexedDB get failed"));
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
+  });
+}
+
+async function localFolderDbSet(handle) {
+  const db = await openLocalFolderDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(LOCAL_FOLDER_STORE, "readwrite");
+    const store = tx.objectStore(LOCAL_FOLDER_STORE);
+    const req = store.put(handle, LOCAL_FOLDER_KEY);
+    req.onsuccess = () => resolve(true);
+    req.onerror = () => reject(req.error || new Error("IndexedDB set failed"));
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
+  });
+}
+
+async function localFolderDbClear() {
+  const db = await openLocalFolderDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(LOCAL_FOLDER_STORE, "readwrite");
+    const store = tx.objectStore(LOCAL_FOLDER_STORE);
+    const req = store.delete(LOCAL_FOLDER_KEY);
+    req.onsuccess = () => resolve(true);
+    req.onerror = () => reject(req.error || new Error("IndexedDB clear failed"));
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
+  });
+}
+
+async function ensureLocalFolderPermission(writeAccess) {
+  if (!localFolderHandle) return { ok: false, reason: "missing" };
+  if (!localFolderHandle.queryPermission) return { ok: true };
+  const mode = writeAccess ? "readwrite" : "read";
+  try {
+    let perm = await localFolderHandle.queryPermission({ mode });
+    if (perm === "granted") return { ok: true };
+    if (localFolderHandle.requestPermission) {
+      perm = await localFolderHandle.requestPermission({ mode });
+    }
+    return { ok: perm === "granted", reason: perm };
+  } catch (err) {
+    return { ok: false, reason: err && err.message ? err.message : "permission error" };
+  }
+}
+
+async function initLocalFolder() {
+  await refreshLocalFolderUi();
+  if (!supportsLocalFolder() || !window.isSecureContext) return;
+  try {
+    const handle = await localFolderDbGet();
+    if (handle && handle.kind === "directory") {
+      localFolderHandle = handle;
+    }
+  } catch {}
+  await refreshLocalFolderUi();
+}
+
+async function pickLocalFolder() {
+  if (!localFolderGuard()) return;
+  try {
+    const handle = await window.showDirectoryPicker();
+    localFolderHandle = handle;
+    await localFolderDbSet(handle);
+    await ensureLocalFolderPermission(true);
+    writeLine("Local folder set.", "ok");
+    await refreshLocalFolderUi();
+  } catch (err) {
+    if (err && err.name === "AbortError") return;
+    writeLine(
+      "Local folder pick failed: " + (err && err.message ? err.message : "error"),
+      "error"
+    );
+  }
+}
+
+async function forgetLocalFolder() {
+  localFolderHandle = null;
+  try {
+    await localFolderDbClear();
+  } catch {}
+  writeLine("Local folder cleared.", "dim");
+  await refreshLocalFolderUi();
+}
+
+async function reportLocalFolderStatus() {
+  if (!localFolderGuard()) return;
+  if (!localFolderHandle) {
+    writeLine("Local folder not set. Run: folder pick", "warn");
+    return;
+  }
+  const perm = await ensureLocalFolderPermission(false);
+  if (!perm.ok) {
+    writeLine("Local folder permission denied.", "warn");
+    await refreshLocalFolderUi();
+    return;
+  }
+  writeLine("Local folder connected.", "ok");
+  writeLine(`Mirror downloads: ${state.localSync && state.localSync.mirror ? "on" : "off"}`, "dim");
+}
+
+function localScriptNameFromFile(fileName) {
+  return String(fileName || "").replace(/\.s$/i, "").trim();
+}
+
+async function syncLocalFolder() {
+  if (!localFolderGuard()) return;
+  if (!localFolderHandle) {
+    writeLine("Local folder not set. Run: folder pick", "warn");
+    return;
+  }
+  if (!state.handle) {
+    writeLine("Set a handle before syncing local scripts.", "warn");
+    return;
+  }
+  const perm = await ensureLocalFolderPermission(false);
+  if (!perm.ok) {
+    writeLine("Local folder permission denied.", "warn");
+    await refreshLocalFolderUi();
+    return;
+  }
+
+  let seen = 0;
+  let added = 0;
+  let updated = 0;
+  let unchanged = 0;
+  try {
+    for await (const entry of localFolderHandle.values()) {
+      if (!entry || entry.kind !== "file") continue;
+      const name = String(entry.name || "");
+      if (!name.toLowerCase().endsWith(".s")) continue;
+      const scriptName = localScriptNameFromFile(name);
+      if (!scriptName) continue;
+      const file = await entry.getFile();
+      const text = await file.text();
+      seen += 1;
+
+      const existing = state.userScripts && state.userScripts[scriptName];
+      const existingCode = existing && typeof existing.code === "string" ? existing.code : null;
+      const secMatch = text.match(/@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i);
+      const sec = secMatch ? secMatch[1].toUpperCase() : "FULLSEC";
+      state.userScripts[scriptName] = { owner: state.handle, name: scriptName, sec, code: text };
+
+      if (!existing) added += 1;
+      else if (existingCode !== text || existing.sec !== sec) updated += 1;
+      else unchanged += 1;
+
+      const driveName = `${state.handle}.${scriptName}.s`;
+      const driveKey = driveId("local", driveName);
+      const meta = { type: "script", script: { name: scriptName, sec, code: text } };
+      if (driveHas(driveKey)) updateDriveContent(driveKey, text, meta);
+      else storeDriveCopy("local", driveName, meta);
+    }
+  } catch (err) {
+    writeLine("Local sync failed: " + (err && err.message ? err.message : "error"), "error");
+    return;
+  }
+
+  if (!seen) {
+    writeLine("Local sync complete: no .s files found.", "dim");
+    return;
+  }
+  writeLine(`Local sync complete: ${added} new, ${updated} updated, ${unchanged} unchanged.`, "ok");
+  markDirty();
+  updateHud();
+}
+
+async function writeLocalMirrorFile(name, content) {
+  const fileHandle = await localFolderHandle.getFileHandle(name, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(content);
+  await writable.close();
+}
+
+function localMirrorFileName(locName, fileName) {
+  const loc = String(locName || "").trim();
+  const file = String(fileName || "").trim();
+  return loc && file ? `${loc}.${file}` : file || "download.txt";
+}
+
+async function mirrorDownloadToLocalFolder(locName, fileName, entry) {
+  if (!state.localSync || !state.localSync.mirror) return;
+  if (!localFolderHandle) {
+    writeLine("Local mirror enabled but no folder selected.", "warn");
+    return;
+  }
+  const perm = await ensureLocalFolderPermission(true);
+  if (!perm.ok) {
+    writeLine("Local mirror blocked: permission denied.", "warn");
+    await refreshLocalFolderUi();
+    return;
+  }
+
+  let content = "";
+  if (entry.type === "script") content = String((entry.script && entry.script.code) || "");
+  else if (entry.type === "text") content = String(entry.content || "");
+  else return;
+
+  const targetName = localMirrorFileName(locName, fileName);
+  try {
+    await writeLocalMirrorFile(targetName, content);
+  } catch (err) {
+    writeLine("Local mirror failed: " + (err && err.message ? err.message : "error"), "warn");
+  }
+}
 
 function writeLine(text, kind) {
   const line = document.createElement("div");
@@ -1622,6 +1929,13 @@ const HELP_DEFS = [
     notes: ["Drive is stored in browser localStorage; capacity is limited."],
   },
   {
+    name: "folder",
+    summary: "Manage local folder sync for scripts.",
+    usage: ["folder pick|status|sync|mirror on|off|forget"],
+    examples: ["folder pick", "folder sync", "folder mirror on"],
+    notes: ["Chromium-only: requires https or localhost."],
+  },
+  {
     name: "edit",
     summary: "Edit a script or a drive text file.",
     usage: ["edit <scriptName> [--example|--from <ref>]", "edit drive:<loc>/<file>"],
@@ -1925,6 +2239,9 @@ const state = {
     enabled: true,
     stepIndex: 0,
     completed: new Set(),
+  },
+  localSync: {
+    mirror: false,
   },
   npcs: {
     known: new Set(["switchboard"]),
@@ -3745,6 +4062,7 @@ function completeActiveDownload() {
     writeLine(`download complete: ${active.file} -> ${driveRef(driveId(active.loc, active.file))}`, "ok");
   }
   markDirty();
+  void mirrorDownloadToLocalFolder(active.loc, active.file, entry);
 
   // Keep tutorial/story reactive.
   storyChatTick();
@@ -4109,6 +4427,31 @@ function hookUi() {
       updateHud();
     });
   }
+
+  if (localFolderPick) {
+    localFolderPick.addEventListener("click", () => {
+      pickLocalFolder();
+    });
+  }
+  if (localFolderSync) {
+    localFolderSync.addEventListener("click", () => {
+      syncLocalFolder();
+    });
+  }
+  if (localFolderForget) {
+    localFolderForget.addEventListener("click", () => {
+      forgetLocalFolder();
+    });
+  }
+  if (localFolderMirror) {
+    localFolderMirror.addEventListener("change", () => {
+      if (!state.localSync) state.localSync = { mirror: false };
+      state.localSync.mirror = !!localFolderMirror.checked;
+      writeLine(`Local mirror ${state.localSync.mirror ? "enabled" : "disabled"}.`, "dim");
+      markDirty();
+      refreshLocalFolderUi();
+    });
+  }
 }
 
 function resetToFreshState(keepChat) {
@@ -4130,6 +4473,7 @@ function resetToFreshState(keepChat) {
   state.traceMax = 4;
   state.driveMax = 12_000;
   state.siphon = { on: false, level: "low", heat: 0, mode: "fixed", source: null };
+  state.localSync = { mirror: false };
   state.lockoutUntil = 0;
   state.wait = { lastAt: 0, streak: 0 };
   state.lastCipher = null;
@@ -5478,6 +5822,7 @@ function getSaveData() {
     trace: state.trace,
     traceMax: state.traceMax,
     lastCipher: state.lastCipher,
+    localSync: state.localSync,
   };
 }
 
@@ -5540,6 +5885,10 @@ function loadState(options) {
               : null,
         }
       : state.siphon || { on: false, level: "low", heat: 0, mode: "fixed", source: null };
+  state.localSync =
+    data.localSync && typeof data.localSync === "object"
+      ? { mirror: !!data.localSync.mirror }
+      : state.localSync || { mirror: false };
   state.lockoutUntil = Number(data.lockoutUntil) || 0;
   state.wait =
     data.wait && typeof data.wait === "object"
@@ -5586,6 +5935,7 @@ function loadState(options) {
   storyChatTick();
   tutorialAdvance();
   ensureSiphonLoop();
+  void refreshLocalFolderUi();
   // If we loaded from legacy key, persist in the new namespace.
   if (localStorage.getItem(SAVE_KEY) === null) localStorage.setItem(SAVE_KEY, JSON.stringify(JSON.parse(raw)));
   saveDirty = false;
@@ -6061,6 +6411,44 @@ function handleCommand(inputText) {
     case "drive":
       driveCommand(args);
       break;
+    case "folder": {
+      const sub = String(args[0] || "").toLowerCase();
+      if (!sub || sub === "status") {
+        reportLocalFolderStatus();
+        break;
+      }
+      if (sub === "pick") {
+        pickLocalFolder();
+        break;
+      }
+      if (sub === "sync") {
+        syncLocalFolder();
+        break;
+      }
+      if (sub === "forget") {
+        forgetLocalFolder();
+        break;
+      }
+      if (sub === "mirror") {
+        const flag = String(args[1] || "").toLowerCase();
+        if (!flag) {
+          writeLine(`Mirror downloads: ${state.localSync && state.localSync.mirror ? "on" : "off"}`, "dim");
+          break;
+        }
+        if (!["on", "off"].includes(flag)) {
+          writeLine("Usage: folder mirror on|off", "warn");
+          break;
+        }
+        if (!state.localSync) state.localSync = { mirror: false };
+        state.localSync.mirror = flag === "on";
+        writeLine(`Local mirror ${state.localSync.mirror ? "enabled" : "disabled"}.`, "ok");
+        markDirty();
+        refreshLocalFolderUi();
+        break;
+      }
+      writeLine("Usage: folder pick|status|sync|mirror on|off|forget", "warn");
+      break;
+    }
     case "history":
       listHistory(args);
       break;
@@ -6530,6 +6918,7 @@ function allCommandNames() {
     "download",
     "downloads",
     "drive",
+    "folder",
     "history",
     "store",
     "buy",
@@ -6604,6 +6993,8 @@ function completeInput({ direction = 1 } = {}) {
     candidates = uniqueSorted([...allDriveRefs(), ...allUserScriptRefs()]);
   } else if (cmd === "drive") {
     candidates = ["ls", "flat"];
+  } else if (cmd === "folder") {
+    candidates = ["pick", "status", "sync", "mirror", "forget"];
   } else if (cmd === "decode") {
     candidates = ["rot13", "b64"];
   } else if (cmd === "install") {
@@ -6694,6 +7085,7 @@ function completeInput({ direction = 1 } = {}) {
 
 function boot() {
   hookUi();
+  void initLocalFolder();
   ensureAutosaveLoop();
   renderChat();
 

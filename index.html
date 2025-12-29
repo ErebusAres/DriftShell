@@ -55,6 +55,26 @@
             ></textarea>
           </section>
 
+          <section id="local-sync">
+            <div class="panel-header">
+              <div class="panel-title dim">local</div>
+              <div class="panel-title dim">/</div>
+              <div class="panel-title dim">sync</div>
+            </div>
+            <div class="local-body">
+              <div id="local-folder-status" class="local-status dim">Local folder not set.</div>
+              <div class="local-actions">
+                <button id="local-folder-pick" class="panel-action dim">Pick Folder</button>
+                <button id="local-folder-sync" class="panel-action dim">Sync Now</button>
+                <button id="local-folder-forget" class="panel-action dim">Forget</button>
+              </div>
+              <label class="local-toggle dim">
+                <input id="local-folder-mirror" type="checkbox" />
+                Mirror downloads to folder
+              </label>
+            </div>
+          </section>
+
           <section id="chat">
             <div id="chat-header" class="panel-header">
               <div class="panel-title dim">chat</div>
