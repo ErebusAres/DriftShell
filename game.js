@@ -10,6 +10,7 @@ const LEGACY_SAVE_KEY = "hackterm_save_v1";
 const LEGACY_SCRATCH_KEY_PREFIX = "hackterm_scratch_v1:";
 
 const SAVE_KEY = `${GAME_ID}_save_v1`;
+const BRIEF_SEEN_KEY = `${GAME_ID}_brief_seen_v1`;
 const SEC_LEVELS = ["NULLSEC", "LOWSEC", "MIDSEC", "HIGHSEC", "FULLSEC"];
 // Drive capacity is an in-world abstraction of browser localStorage limits.
 // Keep it comfortably below typical per-origin quotas (~5MB).
@@ -1448,6 +1449,33 @@ function listContacts() {
   writeLine("Tip: `tell juniper hi`", "dim");
 }
 
+function printOperatorBrief() {
+  writeLine("OPERATOR BRIEF", "header");
+  writeBlock(
+    [
+      "You're in a local drift simulation: a terminal, some nodes, and a security layer.",
+      "Your job is to read, build tools, and breach gates without guessing.",
+      "",
+      "Core loop:",
+      "  1) scan          (find signals / locations)",
+      "  2) cat <file>    (read clues)",
+      "  3) edit <name>   (write a helper script)",
+      "  4) call <script> (run your tool)",
+      "  5) breach <loc>  (solve lock prompts with what you earned)",
+      "",
+      "Scripts are JS-like. You'll see `ctx` + `args` and simple helpers like `ctx.util.checksum(...)`.",
+      "",
+      "Need help?",
+      "  help             (alphabetical index)",
+      "  help call        (examples)",
+      "  help call ?      (args format)",
+      "",
+      "You can reopen this anytime with: tutorial intro",
+    ].join("\n"),
+    "dim"
+  );
+}
+
 const HELP_DEFS = [
   {
     name: "breach",
@@ -1677,7 +1705,7 @@ const HELP_DEFS = [
   {
     name: "tutorial",
     summary: "Show tutorial guidance (and controls).",
-    usage: ["tutorial", "tutorial on|off|reset"],
+    usage: ["tutorial", "tutorial intro", "tutorial on|off|reset"],
   },
   {
     name: "unlock",
@@ -5695,7 +5723,23 @@ function handleCommand(inputText) {
       updateHud();
       return;
     }
-    state.handle = trimmed || "ghost";
+    const handle = trimmed;
+    if (!handle) {
+      writeLine("Handle cannot be blank.", "warn");
+      writeLine("Example: ares_01", "dim");
+      return;
+    }
+    if (handle.length < 4) {
+      writeLine("Handle too short (min 4).", "warn");
+      writeLine("Example: ares_01", "dim");
+      return;
+    }
+    if (!/^[A-Za-z0-9_]+$/.test(handle)) {
+      writeLine("Handle must be letters/numbers/underscore only.", "warn");
+      writeLine("Example: ares_01", "dim");
+      return;
+    }
+    state.handle = handle;
     writeLine(`HANDLE SET: ${state.handle}`, "ok");
     chatPost({ channel: state.chat.channel, from: "sys", body: `*** ${state.handle} connected`, kind: "system" });
     loadScratchFromStorage();
@@ -5958,7 +6002,9 @@ function handleCommand(inputText) {
       waitTick();
       break;
     case "tutorial":
-      if (args[0] === "off") tutorialSetEnabled(false);
+      if (args[0] === "intro" || args[0] === "brief") {
+        printOperatorBrief();
+      } else if (args[0] === "off") tutorialSetEnabled(false);
       else if (args[0] === "on") tutorialSetEnabled(true);
       else if (args[0] === "reset") {
         state.tutorial.stepIndex = 0;
@@ -5984,6 +6030,7 @@ function handleCommand(inputText) {
         break;
       }
       localStorage.removeItem(SAVE_KEY);
+      localStorage.removeItem(BRIEF_SEEN_KEY);
       writeLine("Save deleted.", "ok");
       break;
     }
@@ -5996,6 +6043,7 @@ function handleCommand(inputText) {
       }
       if (state.handle) writeLine(`sys::disconnect ${state.handle}`, "dim");
       localStorage.removeItem(SAVE_KEY);
+      localStorage.removeItem(BRIEF_SEEN_KEY);
       screen.innerHTML = "";
       resetToFreshState(false);
       writeLine("Restarted.", "ok");
@@ -6474,7 +6522,13 @@ function boot() {
 
   window.setTimeout(() => {
     if (!loadState({ silent: true })) {
+      // First-run brief (once per fresh save).
+      if (!localStorage.getItem(BRIEF_SEEN_KEY)) {
+        printOperatorBrief();
+        localStorage.setItem(BRIEF_SEEN_KEY, "1");
+      }
       writeLine("Enter a handle to begin.", "dim");
+      writeLine("Min 4 chars, letters/numbers/underscore. Example: ares_01", "dim");
       writeLine("Tip: type `help` for examples, or `tutorial` to reprint steps.", "dim");
       loadScratchFromStorage();
       tutorialAdvance();
