@@ -15,7 +15,7 @@ const SEC_LEVELS = ["NULLSEC", "LOWSEC", "MIDSEC", "HIGHSEC", "FULLSEC"];
 // Keep it comfortably below typical per-origin quotas (~5MB).
 const DRIVE_MAX_CAP_BYTES = 4_000_000;
 // Hackmud-like corruption glyph for "missing" characters in the signal.
-const GLITCH_GLYPH = "▓";
+const GLITCH_GLYPH = "█";
 const PRIMER_PAYLOAD = "DRIFTLOCAL::SEED=7|11|23|5|13|2";
 const WARDEN_PAYLOAD = "WARDEN::PHASE=1|KEY=RELIC|TRACE=4";
 const UPLINK_PAYLOAD = "UPLINK::PATCH=1|RELAY=MIRROR";
@@ -1017,6 +1017,56 @@ function chatHelp() {
   chatSystem("chat commands: /help, /join #chan, /switch #chan, /channels, /tell <npc> <msg>");
 }
 
+function handleChatLine(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return;
+
+  if (value.startsWith("/")) {
+    const parts = splitArgs(value.slice(1));
+    const cmd = (parts[0] || "").toLowerCase();
+    const args = parts.slice(1);
+    if (cmd === "help") {
+      chatHelp();
+      return;
+    }
+    if (cmd === "join") {
+      if (!args[0]) {
+        chatSystem("Usage: /join #channel");
+        return;
+      }
+      chatJoin(args[0]);
+      return;
+    }
+    if (cmd === "switch") {
+      if (!args[0]) {
+        chatSystem("Usage: /switch #channel");
+        return;
+      }
+      chatSwitch(args[0]);
+      return;
+    }
+    if (cmd === "channels") {
+      chatSystem("channels: " + Array.from(state.chat.channels).sort().join(", "));
+      return;
+    }
+    if (cmd === "tell" || cmd === "dm" || cmd === "whisper") {
+      if (!args[0]) {
+        chatSystem("Usage: /tell <npc> <msg>");
+        return;
+      }
+      const npc = args[0];
+      const msg = args.slice(1).join(" ");
+      tellNpc(npc, msg);
+      return;
+    }
+    chatSystem("Unknown chat command. Try /help");
+    return;
+  }
+
+  // Plain text behaves like `say ...`.
+  chatPost({ body: value });
+}
+
 const NPCS = {
   switchboard: {
     id: "switchboard",
@@ -1396,6 +1446,320 @@ function listContacts() {
       writeLine(`- ${id}${npc ? " (" + npc.display + ")" : ""}`, "dim");
     });
   writeLine("Tip: `tell juniper hi`", "dim");
+}
+
+const HELP_DEFS = [
+  {
+    name: "breach",
+    summary: "Start a lock-stack breach on a loc.",
+    usage: ["breach <loc>"],
+    examples: ["breach sable.gate", "unlock badge.sig", "wait"],
+    notes: ["If you fail too often, TRACE kicks you back."],
+  },
+  {
+    name: "call",
+    aliases: ["run"],
+    summary: "Run a script with args.",
+    usage: ["call <script> [args]"],
+    examples: ["call scripts.trust.accts.balance", "call kit.tracer", "call chk primer.dat"],
+    argsDetails: [
+      "Positional: `call some.script a b c` -> `args._ = [\"a\",\"b\",\"c\"]`",
+      "Named: `call some.script key=value` -> `args.key = \"value\"`",
+      "Quotes: `msg=\"hello world\"` (values are strings)",
+    ],
+  },
+  {
+    name: "cat",
+    summary: "Read a file or view script source.",
+    usage: ["cat <file|script|drive:loc/file>"],
+    examples: ["cat primer.dat", "cat drive:sable.gate/cipher.txt", "cat kit.tracer", "cat <your_handle>.chk"],
+  },
+  {
+    name: "channels",
+    summary: "List chat channels you know.",
+    usage: ["channels"],
+    examples: ["channels", "join #ops", "switch #kernel"],
+  },
+  {
+    name: "clear",
+    summary: "Clear the terminal screen.",
+    usage: ["clear"],
+  },
+  {
+    name: "connect",
+    summary: "Connect to a discovered loc.",
+    usage: ["connect <loc> [--breach]"],
+    examples: ["connect public.exchange", "connect sable.gate --breach"],
+    notes: ["No-lock locs open automatically once requirements are met."],
+  },
+  {
+    name: "contacts",
+    summary: "List NPC contacts.",
+    usage: ["contacts"],
+    examples: ["contacts", "tell juniper hi"],
+  },
+  {
+    name: "dc",
+    aliases: ["disconnect"],
+    summary: "Drop the link and route back to home.hub.",
+    usage: ["dc", "disconnect"],
+    notes: ["Cancels downloads; clears active breach pressure."],
+  },
+  {
+    name: "decode",
+    summary: "Decode rot13 or base64 (uses cached cipher if omitted).",
+    usage: ["decode rot13|b64 [text]"],
+    examples: ["cat cipher.txt", "decode rot13", "decode b64 U0lHSUw6IExBVFRJQ0U="],
+  },
+  {
+    name: "del",
+    summary: "Delete drive files or your local scripts.",
+    usage: ["del <loc/file> | del drive:<loc>/<file> | del <your_handle>.<script> --confirm"],
+    examples: ["del sable.gate/cipher.txt", "del public.exchange/*.log", "del <your_handle>.chk --confirm"],
+  },
+  {
+    name: "diagnose",
+    summary: "Show story progression status.",
+    usage: ["diagnose"],
+  },
+  {
+    name: "download",
+    summary: "Queue file downloads from the current loc.",
+    usage: ["download <file|glob>"],
+    examples: ["download tracer.s", "download *.s", "downloads"],
+    argsDetails: [
+      "`*` matches any run of characters; `?` matches one character.",
+      "Globs only apply to `download` (not `cat`, not `breach`).",
+    ],
+    notes: ["Downloads take time; upgrades like upg.modem/backbone make them faster."],
+  },
+  {
+    name: "downloads",
+    summary: "Show download queue status.",
+    usage: ["downloads"],
+  },
+  {
+    name: "drive",
+    summary: "Show your local drive contents and usage.",
+    usage: ["drive", "drive ls", "drive flat"],
+    examples: ["drive", "drive ls", "cat drive:sable.gate/cipher.txt"],
+    notes: ["Drive is stored in browser localStorage; capacity is limited."],
+  },
+  {
+    name: "edit",
+    summary: "Edit a script or a drive text file.",
+    usage: ["edit <scriptName> [--example|--from <ref>]", "edit drive:<loc>/<file>"],
+    examples: ["edit chk --example", "edit chk", "edit drive:local/notes.txt"],
+    notes: ["Editor cmds: :p, :d N, :r N <text>, :i N <text>, :a N <text>, :clear, :wq, :q"],
+  },
+  {
+    name: "export",
+    summary: "Export your save as JSON.",
+    usage: ["export"],
+  },
+  {
+    name: "history",
+    summary: "Show recent locs/files and where they came from.",
+    usage: ["history", "history clear"],
+  },
+  {
+    name: "import",
+    summary: "Import a save JSON (file picker or pasted JSON).",
+    usage: ["import", "import <json>"],
+  },
+  {
+    name: "install",
+    summary: "Install an upgrade you bought/downloaded.",
+    usage: ["install <upgradeId>"],
+    examples: ["install upg.modem"],
+  },
+  {
+    name: "inventory",
+    summary: "List inventory items and installed upgrades.",
+    usage: ["inventory"],
+  },
+  {
+    name: "jobs",
+    summary: "List active jobs/contracts.",
+    usage: ["jobs"],
+  },
+  {
+    name: "join",
+    summary: "Join a chat channel (clears channel buffer).",
+    usage: ["join #channel"],
+    examples: ["join #kernel", "switch #ops"],
+  },
+  {
+    name: "chat",
+    summary: "Chat commands and behavior.",
+    usage: ["say <text>", "join #channel", "tell <npc> <msg>", "chat box: /join #channel"],
+    examples: ["say hello", "join #kernel", "tell juniper work", "chat box: /help"],
+    notes: ["Only one channel is shown at a time; switching clears the buffer (DMs are preserved)."],
+  },
+  {
+    name: "load",
+    summary: "Load your saved game.",
+    usage: ["load"],
+  },
+  {
+    name: "ls",
+    summary: "List files at the current loc (including uploads).",
+    usage: ["ls"],
+  },
+  {
+    name: "marks",
+    summary: "Show marks/progress milestones.",
+    usage: ["marks"],
+  },
+  {
+    name: "probe",
+    summary: "Probe a loc for basic info (trust).",
+    usage: ["probe <loc>"],
+  },
+  {
+    name: "reset",
+    summary: "Delete your saved game from localStorage.",
+    usage: ["reset --confirm"],
+  },
+  {
+    name: "restart",
+    summary: "Restart from scratch (deletes save).",
+    usage: ["restart --confirm"],
+  },
+  {
+    name: "save",
+    summary: "Save now (autosave also runs).",
+    usage: ["save"],
+  },
+  {
+    name: "say",
+    summary: "Post a message to the current chat channel.",
+    usage: ["say <text>"],
+  },
+  {
+    name: "scan",
+    summary: "Scan for signals and list discovered locs (trust).",
+    usage: ["scan"],
+  },
+  {
+    name: "scripts",
+    summary: "List available scripts (trust/kit/local).",
+    usage: ["scripts"],
+    examples: ["scripts", "call scripts.trust.get_level scripts.trust.scan"],
+  },
+  {
+    name: "siphon",
+    summary: "Risky passive GC income (requires upg.siphon).",
+    usage: ["siphon", "siphon on|off", "siphon set low|med|high"],
+  },
+  {
+    name: "store",
+    summary: "Show the store (only at public.exchange).",
+    usage: ["store"],
+    examples: ["connect public.exchange", "store", "buy upg.modem", "install upg.modem"],
+  },
+  {
+    name: "switch",
+    summary: "Switch to a chat channel (acts like join).",
+    usage: ["switch #channel"],
+  },
+  {
+    name: "tell",
+    summary: "DM an NPC (replies show inline).",
+    usage: ["tell <npc> <msg>"],
+    examples: ["tell switchboard hint", "tell juniper work"],
+  },
+  {
+    name: "turnin",
+    summary: "Turn in a job item when a contract asks for it.",
+    usage: ["turnin <mask|token>"],
+  },
+  {
+    name: "tutorial",
+    summary: "Show tutorial guidance (and controls).",
+    usage: ["tutorial", "tutorial on|off|reset"],
+  },
+  {
+    name: "unlock",
+    summary: "Answer the current breach lock prompt.",
+    usage: ["unlock <answer>"],
+  },
+  {
+    name: "upload",
+    summary: "Upload a drive file or script into the current loc.",
+    usage: ["upload <drive:loc/file|script> <destFile>"],
+    examples: ["upload <your_handle>.patch patch.s", "upload drive:sable.gate/cipher.txt note.txt"],
+    notes: ["Uploads only target your current connected loc."],
+  },
+  {
+    name: "uploads",
+    summary: "List uploaded files by loc.",
+    usage: ["uploads"],
+  },
+  {
+    name: "wait",
+    summary: "Cool TRACE (spamming is punished).",
+    usage: ["wait"],
+  },
+];
+
+function helpResolve(topic) {
+  const key = String(topic || "").trim().toLowerCase();
+  if (!key) return null;
+  const direct = HELP_DEFS.find((d) => d.name.toLowerCase() === key);
+  if (direct) return direct;
+  const alias = HELP_DEFS.find((d) => (d.aliases || []).some((a) => String(a).toLowerCase() === key));
+  return alias || null;
+}
+
+function helpPrintIndex() {
+  writeLine("HELP", "header");
+  const defs = HELP_DEFS.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const pad = defs.reduce((m, d) => Math.max(m, String(d.name).length), 0);
+  defs.forEach((d) => {
+    const name = String(d.name).padEnd(pad, " ");
+    writeLine(`${name}  ${d.summary}`, "dim");
+  });
+  writeLine("Type: `help <command>` for details.", "dim");
+}
+
+function helpPrintTopic(topic, wantsArgs) {
+  const def = helpResolve(topic);
+  if (!def) {
+    writeLine("Unknown help topic.", "warn");
+    writeLine("Tip: `help` to list commands.", "dim");
+    return;
+  }
+  writeLine(`HELP ${def.name.toUpperCase()}`, "header");
+  writeLine(def.summary, "dim");
+
+  const aliases = (def.aliases || []).map(String).filter(Boolean);
+  if (aliases.length) writeLine(`Aliases: ${aliases.join(", ")}`, "dim");
+
+  const usage = (def.usage || []).map(String).filter(Boolean);
+  if (usage.length) {
+    writeLine("Usage:", "header");
+    usage.forEach((u) => writeLine("  " + u, "dim"));
+  }
+
+  const examples = (def.examples || []).map(String).filter(Boolean);
+  if (examples.length) {
+    writeLine("Examples:", "header");
+    examples.forEach((ex) => writeLine("  " + ex, "dim"));
+  }
+
+  if (wantsArgs && Array.isArray(def.argsDetails) && def.argsDetails.length) {
+    writeLine("Args:", "header");
+    def.argsDetails.forEach((ln) => writeLine("  " + ln, "dim"));
+  } else if (Array.isArray(def.argsDetails) && def.argsDetails.length) {
+    writeLine("Tip: `help " + def.name + " ?` for args details.", "dim");
+  }
+
+  const notes = (def.notes || []).map(String).filter(Boolean);
+  if (notes.length) {
+    writeLine("Notes:", "header");
+    notes.forEach((n) => writeLine("  " + n, "dim"));
+  }
 }
 
 function splitArgs(inputText) {
@@ -5196,6 +5560,12 @@ function handleCommand(inputText) {
   const trimmed = raw.trim();
   if (!trimmed) return;
 
+  // Allow slash-prefixed chat commands from the terminal (e.g. /tell, /join, /help).
+  if (trimmed.startsWith("/")) {
+    handleChatLine(trimmed);
+    return;
+  }
+
   if (state.editor) {
     const t = trimmed;
     if (t.startsWith(":")) {
@@ -5349,181 +5719,12 @@ function handleCommand(inputText) {
   switch (cmd) {
     case "help":
       if (args[0]) {
-        const topic = args[0].toLowerCase();
+        const topic = args[0];
         const wantsArgs = args[1] === "?";
-
-        if (topic === "scripts") {
-          writeLine("help scripts", "header");
-          writeLine("List scripts: `scripts`", "dim");
-          writeLine("Check sec level: `call scripts.trust.get_level scripts.trust.scan`", "dim");
-          writeLine("Run a kit script: `call kit.tracer`", "dim");
-          break;
-        }
-
-        if (topic === "call" || topic === "run") {
-          writeLine("help call", "header");
-          writeLine("Usage: `call <script> [args]`", "dim");
-          writeLine("Trust: `call scripts.trust.accts.balance`", "dim");
-          writeLine("Kit: `call kit.tracer`", "dim");
-          writeLine("Named args: `call scripts.trust.chats.send msg=\"hello\"`", "dim");
-          if (wantsArgs) {
-            writeLine("Args format:", "header");
-            writeLine("Positional: `call some.script a b c` -> `args._ = [\"a\",\"b\",\"c\"]`", "dim");
-            writeLine("Named: `call some.script key=value` -> `args.key = \"value\"`", "dim");
-            writeLine("Quotes: `msg=\"hello world\"` (values are strings)", "dim");
-          } else {
-            writeLine("Tip: `help call ?` to see args format.", "dim");
-          }
-          break;
-        }
-
-        if (topic === "download") {
-          writeLine("help download", "header");
-          writeLine("Queue file downloads. Time depends on file size.", "dim");
-          writeLine("Single file: `download tracer.s`", "dim");
-          writeLine("Wildcard: `download *.s` (only works for `download`)", "dim");
-          writeLine("Queue status: `downloads`", "dim");
-          writeLine("All downloads are stored on your drive: `drive` then `cat drive:loc/file`", "dim");
-          writeLine("Scripts still install to kit; items/upgrades still go to inventory.", "dim");
-          writeLine("Tip: upgrades like `upg.modem` and `upg.backbone` make downloads faster.", "dim");
-          if (wantsArgs) {
-            writeLine("Wildcard rules:", "header");
-            writeLine("`*` matches any run of characters; `?` matches one character.", "dim");
-            writeLine("Globs only apply to `download` (not `cat`, not `breach`).", "dim");
-          }
-          break;
-        }
-
-        if (topic === "cat") {
-          writeLine("help cat", "header");
-          writeLine("Read a file in the current loc: `cat primer.dat`", "dim");
-          writeLine("Read a downloaded text file: `cat drive:sable.gate/cipher.txt`", "dim");
-          writeLine("View script source: `cat kit.tracer` or `cat <your_handle>.chk`", "dim");
-          break;
-        }
-
-        if (topic === "edit") {
-          writeLine("help edit", "header");
-          writeLine("Create or edit a script: `edit chk` then `:wq`", "dim");
-          writeLine("Load the checksum template: `edit chk --example`", "dim");
-          writeLine("Or: `edit chk --from chk.example`", "dim");
-          writeLine("Note: templates are sanitized to code-only (header text is stripped).", "dim");
-          writeLine("Tip: `@sec FULLSEC` will be auto-fixed to `// @sec FULLSEC` when saving.", "dim");
-          writeLine("Edit a drive file: `edit drive:local/notes.txt`", "dim");
-          writeLine("Editor cmds: :p, :d N, :r N <text>, :i N <text>, :a N <text>", "dim");
-          break;
-        }
-
-        if (topic === "del" || topic === "delete" || topic === "rm") {
-          writeLine("help del", "header");
-          writeLine("Delete downloaded drive files or your local scripts.", "dim");
-          writeLine("Delete a drive file: `del sable.gate/cipher.txt` (or `del drive:sable.gate/cipher.txt`)", "dim");
-          writeLine("Drive wildcards: `del public.exchange/*.log`", "dim");
-          writeLine("Delete your script: `del <your_handle>.chk --confirm`", "dim");
-          break;
-        }
-
-        if (topic === "drive") {
-          writeLine("help drive", "header");
-          writeLine("Show your local drive tree: `drive`", "dim");
-          writeLine("Expanded drive tree + full refs: `drive ls`", "dim");
-          writeLine("Read one: `cat drive:sable.gate/cipher.txt`", "dim");
-          writeLine("Tip: cipher files set your decode buffer (like `cat` does).", "dim");
-          writeLine("Note: your local scripts are mirrored into drive too (so size matters).", "dim");
-          break;
-        }
-
-        if (topic === "history") {
-          writeLine("help history", "header");
-          writeLine("Show recent locs/files you interacted with.", "dim");
-          writeLine("Run: `history`", "dim");
-          writeLine("Clear: `history clear`", "dim");
-          break;
-        }
-
-        if (topic === "upload" || topic === "uploads") {
-          writeLine("help upload", "header");
-          writeLine("Upload a local script or drive file back into a loc.", "dim");
-          writeLine("Uploads always target your current connected loc.", "dim");
-          writeLine("Upload (current loc): `upload drive:sable.gate/cipher.txt note.txt`", "dim");
-          writeLine("Upload a script: `upload <your_handle>.patch patch.s`", "dim");
-          writeLine("Tip: connect to the loc you want to upload into, then run upload.", "dim");
-          writeLine("View uploads: `uploads`", "dim");
-          break;
-        }
-
-        if (topic === "store" || topic === "buy") {
-          writeLine("help store", "header");
-          writeLine("Juniper sells upgrades at the exchange.", "dim");
-          writeLine("List: `store` (only at public.exchange)", "dim");
-          writeLine("Buy: `buy upg.modem`", "dim");
-          writeLine("Install: `install upg.modem`", "dim");
-          break;
-        }
-
-        if (topic === "siphon") {
-          writeLine("help siphon", "header");
-          writeLine("Optional passive GC income (risky). Requires `install upg.siphon`.", "dim");
-          writeLine("Status: `siphon`", "dim");
-          writeLine("Enable/disable: `siphon on` / `siphon off`", "dim");
-          writeLine("Intensity: `siphon set low|med|high` (higher = more GC + more risk)", "dim");
-          writeLine("Scripted payout: upload a script, then `siphon use relay.uplink:siphon.s`", "dim");
-          writeLine("Script output: `ctx.print('gc=2 heat=3')` or `ctx.print(JSON.stringify({gc:2,heat:3}))`", "dim");
-          break;
-        }
-
-        if (topic === "breach") {
-          writeLine("help breach", "header");
-          writeLine("Start: `breach sable.gate`", "dim");
-          writeLine("Answer: `unlock badge.sig`", "dim");
-          writeLine("If you fail too often, TRACE kicks you back. Use `wait`.", "dim");
-          break;
-        }
-
-        if (topic === "connect") {
-          writeLine("help connect", "header");
-          writeLine("Connect to a discovered loc: `connect public.exchange`", "dim");
-          writeLine("If locked: `breach public.exchange` (or `connect public.exchange --breach`)", "dim");
-          writeLine("No-lock locs open automatically once requirements are met.", "dim");
-          break;
-        }
-
-        if (topic === "chat") {
-          writeLine("help chat", "header");
-          writeLine("Send: `say hello`", "dim");
-          writeLine("Join: `join #ops`", "dim");
-          writeLine("Switch: `switch #kernel`", "dim");
-          writeLine("DM an NPC: `tell juniper hi`", "dim");
-          writeLine("Or use the chat box: `/help`, `/join #ops`", "dim");
-          break;
-        }
-
-        writeLine("Unknown help topic. Try: `help`", "warn");
-        break;
+        helpPrintTopic(topic, wantsArgs);
+      } else {
+        helpPrintIndex();
       }
-
-      writeBlock(
-        [
-          "Commands:",
-          "  scan | probe <loc> | connect <loc>",
-          "  breach <loc> | unlock <answer> | wait",
-          "  ls | cat <file> | download <file|glob> | downloads",
-          "  drive | history | upload <src> [loc|file|loc:file] [file] | uploads",
-          "  store | buy <item> | install <upgrade> | siphon ...",
-          "  scripts | call <script> [args] | edit <name> | decode rot13|b64 [text]",
-          "  say <text> | join #chan | switch #chan | channels | tell <npc> <msg>",
-          "  inventory | install <upgrade> | marks | jobs | turnin <mask|token>",
-          "  diagnose | stabilize | corrupt",
-          "  save | load | export | import | reset | clear | restart --confirm",
-          "",
-          "Tips:",
-          "  help call        (examples)",
-          "  help call ?      (args format)",
-          "  help download    (queue + wildcards)",
-          "  help download ?  (glob rules)",
-        ].join("\n"),
-        "dim"
-      );
       break;
     case "scripts":
       listScripts();
@@ -5604,6 +5805,39 @@ function handleCommand(inputText) {
       storyChatTick();
       tutorialNextHint();
       break;
+    case "disconnect":
+    case "dc": {
+      // Fast drop back to home.hub. Useful to dodge timed pulses (e.g. core.relic pressure).
+      if (state.breach && state.breach.pressure) {
+        try {
+          window.clearInterval(state.breach.pressure);
+        } catch {}
+      }
+      state.breach = null;
+
+      // Dropping the link cancels downloads (no fines; just lost progress).
+      try {
+        if (state.downloads && state.downloads.active) {
+          if (state.downloads.active.tick) window.clearInterval(state.downloads.active.tick);
+          if (state.downloads.active.timer) window.clearTimeout(state.downloads.active.timer);
+        }
+      } catch {}
+      const hadDownloads =
+        !!(state.downloads && (state.downloads.active || (state.downloads.queue && state.downloads.queue.length)));
+      state.downloads = { active: null, queue: [] };
+
+      if (state.loc !== "home.hub") {
+        state.loc = "home.hub";
+        writeLine("CONNECTION DROPPED. ROUTING HOME.", "warn");
+        showLoc();
+      } else {
+        writeLine("Already at home.hub.", "dim");
+      }
+      if (hadDownloads) writeLine("downloads canceled", "dim");
+      updateHud();
+      markDirty();
+      break;
+    }
     case "breach":
       if (!args.length) {
         writeLine("Usage: breach <loc>", "warn");
@@ -5998,55 +6232,9 @@ if (chatInput) {
     event.stopPropagation();
 
     const raw = chatInput.value;
-    const value = raw.trim();
     // Always clear the box on Enter (even if the command is invalid).
     chatInput.value = "";
-    if (!value) return;
-
-    if (value.startsWith("/")) {
-      const parts = splitArgs(value.slice(1));
-      const cmd = (parts[0] || "").toLowerCase();
-      const args = parts.slice(1);
-      if (cmd === "help") {
-        chatHelp();
-        return;
-      }
-      if (cmd === "join") {
-        if (!args[0]) {
-          chatSystem("Usage: /join #channel");
-          return;
-        }
-        chatJoin(args[0]);
-        return;
-      }
-      if (cmd === "switch") {
-        if (!args[0]) {
-          chatSystem("Usage: /switch #channel");
-          return;
-        }
-        chatSwitch(args[0]);
-        return;
-      }
-      if (cmd === "channels") {
-        chatSystem("channels: " + Array.from(state.chat.channels).sort().join(", "));
-        return;
-      }
-      if (cmd === "tell" || cmd === "dm" || cmd === "whisper") {
-        if (!args[0]) {
-          chatSystem("Usage: /tell <npc> <msg>");
-          return;
-        }
-        const npc = args[0];
-        const msg = args.slice(1).join(" ");
-        tellNpc(npc, msg);
-        return;
-      }
-      chatSystem("Unknown chat command. Try /help");
-      return;
-    }
-
-    // Plain text in the chat box behaves like `say ...`
-    chatPost({ body: value });
+    handleChatLine(raw);
   });
 }
 
@@ -6102,6 +6290,8 @@ function allCommandNames() {
     "scan",
     "probe",
     "connect",
+    "disconnect",
+    "dc",
     "breach",
     "unlock",
     "ls",
