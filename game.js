@@ -21,18 +21,25 @@ const DRIVE_MAX_CAP_BYTES = 4_000_000;
 // Hackmud-like corruption glyph for "missing" characters in the signal.
 const GLITCH_GLYPH = "█";
 const PRIMER_PAYLOAD = "DRIFTLOCAL::SEED=7|11|23|5|13|2";
+const TRAINING_WORD = "WELCOME";
+const TRAINING_HOME = "HOME";
 const WARDEN_PAYLOAD = "WARDEN::PHASE=1|KEY=RELIC|TRACE=4";
 const UPLINK_PAYLOAD = "UPLINK::PATCH=1|RELAY=MIRROR";
 const CHK_TEMPLATE_CODE = [
   "// @sec FULLSEC",
   "const primer = ctx.read('primer.dat') || '';",
-  "const m = primer.match(/^payload=(.*)$/m);",
-  "const payload = m ? String(m[1]).trim() : '';",
+  "const word = (primer.match(/^word=(.*)$/m) || [])[1] || 'WELCOME';",
+  "const home = (primer.match(/^home=(.*)$/m) || [])[1] || 'HOME';",
+  "const payload = (primer.match(/^payload=(.*)$/m) || [])[1] || '';",
   "if (!payload) { ctx.print('no payload'); return; }",
-  "const text = payload + '|HANDLE=' + ctx.handle();",
+  "const handle = ctx.handle();",
+  "const text = payload.trim() + '|HANDLE=' + handle;",
   "const sum = ctx.util.checksum(text);",
-  "const out = ctx.util.hex3(sum);",
-  "ctx.print(out);",
+  "const key3 = ctx.util.hex3(sum);",
+  "ctx.print(handle);",
+  "ctx.print(String(word).trim());",
+  "ctx.print(key3);",
+  "ctx.print(handle + ' ' + String(word).trim() + ' ' + String(home).trim() + ' ' + key3);",
 ].join("\n");
 const UPGRADE_DEFS = {
   "upg.trace_spool": {
@@ -99,9 +106,12 @@ function hex3(n) {
   return v.toString(16).toUpperCase().padStart(3, "0");
 }
 
+function trainingHandle() {
+  return state.handle ? String(state.handle) : "ghost";
+}
+
 function handleTag() {
-  const handle = state.handle ? String(state.handle) : "ghost";
-  return `HANDLE=${handle}`;
+  return `HANDLE=${trainingHandle()}`;
 }
 
 function primerTextForHandle(payload) {
@@ -110,6 +120,22 @@ function primerTextForHandle(payload) {
 
 function expectedForChecksumPayload(payload) {
   return hex3(checksumUtf8Mod4096(primerTextForHandle(payload)));
+}
+
+function trainingKey1() {
+  return trainingHandle();
+}
+
+function trainingKey2() {
+  return TRAINING_WORD;
+}
+
+function trainingKey3() {
+  return expectedForChecksumPayload(PRIMER_PAYLOAD);
+}
+
+function trainingPhrase() {
+  return `${trainingKey1()} ${TRAINING_WORD} ${TRAINING_HOME} ${trainingKey3()}`;
 }
 
 const screen = document.getElementById("screen");
@@ -1494,25 +1520,30 @@ function npcReply(npcId, body) {
         channel: dmChannel(npcId),
         from: "switchboard",
         body:
-          "Line 1: read the primer -> `const primer = ctx.read('primer.dat') || ''` (gets the payload text).",
+          "Line 1: read the primer -> `const primer = ctx.read('primer.dat') || ''`.",
       });
       chatPost({
         channel: dmChannel(npcId),
         from: "switchboard",
         body:
-          "Line 2: extract payload -> find `payload=` and strip it (so you don't hardcode secrets).",
+          "Line 2: pull the word/home -> `word=` and `home=` from the primer.",
       });
       chatPost({
         channel: dmChannel(npcId),
         from: "switchboard",
         body:
-          "Line 3: bind to YOU -> `text = payload + '|HANDLE=' + ctx.handle()` (locks are handle-dependent).",
+          "Line 3: pull payload -> find `payload=` and build `payload|HANDLE=<you>`.",
       });
       chatPost({
         channel: dmChannel(npcId),
         from: "switchboard",
         body:
-          "Line 4: compute + format -> `ctx.util.checksum(text)` then `ctx.util.hex3(sum)` then `ctx.print(out)`.",
+          "Line 4: checksum -> `ctx.util.checksum(text)` then `ctx.util.hex3(sum)`.",
+      });
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body: "Line 5: print KEY1, KEY2, KEY3, then the full phrase.",
       });
       chatPost({
         channel: dmChannel(npcId),
@@ -2304,12 +2335,14 @@ const LOCS = {
           "ALGO: checksum(text) = (sum of UTF-8 bytes) % 4096",
           "Format as 3-hex (uppercase). Example: 00A, 8EB, FFF",
           "",
-          "Key 1: HANDLE=<your_handle>",
+          "word=" + TRAINING_WORD,
+          "home=" + TRAINING_HOME,
           "payload=" + PRIMER_PAYLOAD,
-          "Key 2: text = payload + '|HANDLE=<your_handle>'",
-          "Key 3: checksum(text) -> hex3",
           "",
-          "Target: training.node lock expects Key 1, Key 2, then Key 3 (in order).",
+          "Key 1: <your_handle>",
+          "Key 2: word (from this file)",
+          "Key 3: checksum(payload|HANDLE=<your_handle>) -> hex3",
+          "Final: <handle> <word> <home> <key3>",
         ].join("\n"),
       },
       "script.intro": {
@@ -2323,31 +2356,34 @@ const LOCS = {
           "- They cut typos out of lock answers.",
           "- They let you scale from one task to many.",
           "",
-          "1) Print output (your first script).",
-          "  ctx.print('hello');",
+          "You will build one script in 3 small steps.",
+          "Each step prints a key. Keep prior lines as you go.",
+          "The final line prints the full phrase.",
           "",
-          "2) Use your handle (the shell knows it).",
-          "  ctx.print('HANDLE=' + ctx.handle());",
+          "Step 1: print your handle (KEY1).",
+          "  const handle = ctx.handle();",
+          "  ctx.print(handle);",
+          "Why: your handle makes every answer unique to you.",
           "",
-          "3) Accept input (args are words after the script name).",
-          "  const who = args._[0] || 'DRIFT';",
-          "  ctx.print('hi ' + who);",
-          "  // run: call <you>.hello weaver",
-          "",
-          "4) Read a file (text in, text out).",
+          "Step 2: read the primer and print the word (KEY2).",
           "  const primer = ctx.read('primer.dat') || '';",
+          "  const word = (primer.match(/^word=(.*)$/m) || [])[1] || 'WELCOME';",
+          "  ctx.print(String(word).trim());",
+          "Why: reading files is how you get lock hints.",
           "",
-          "5) Build text, then checksum it (lock answers).",
-          "  const text = '<payload>' + '|HANDLE=' + ctx.handle();",
+          "Step 3: compute the checksum (KEY3).",
+          "  const payload = (primer.match(/^payload=(.*)$/m) || [])[1] || '';",
+          "  const text = payload.trim() + '|HANDLE=' + handle;",
           "  const sum = ctx.util.checksum(text);",
-          "  ctx.print(ctx.util.hex3(sum));",
+          "  const key3 = ctx.util.hex3(sum);",
+          "  ctx.print(key3);",
+          "Why: the lock wants a computed answer, not a guess.",
           "",
-          "Training.node uses three keys:",
-          "  KEY1 = HANDLE=<your_handle>",
-          "  KEY2 = payload|KEY1  (see primer.dat)",
-          "  KEY3 = hex3(checksum(KEY2))",
-          "Keep your outputs; the three keys form an access phrase.",
+          "Final phrase (print it to unlock the last lock):",
+          "  const home = (primer.match(/^home=(.*)$/m) || [])[1] || 'HOME';",
+          "  ctx.print(handle + ' ' + word.trim() + ' ' + home.trim() + ' ' + key3);",
           "",
+          "Run after each step: `call <you>.chk`",
           "Fast path: `edit chk --example`, then `:wq`.",
         ].join("\n"),
       },
@@ -2358,13 +2394,18 @@ const LOCS = {
           "Paste this into `edit chk` and save with `:wq`.",
           "",
           "const primer = ctx.read('primer.dat') || '';",
-          "const m = primer.match(/^payload=(.*)$/m);",
-          "const payload = m ? String(m[1]).trim() : '';",
+          "const word = (primer.match(/^word=(.*)$/m) || [])[1] || 'WELCOME';",
+          "const home = (primer.match(/^home=(.*)$/m) || [])[1] || 'HOME';",
+          "const payload = (primer.match(/^payload=(.*)$/m) || [])[1] || '';",
           "if (!payload) { ctx.print('no payload'); return; }",
-          "const text = payload + '|HANDLE=' + ctx.handle();",
+          "const handle = ctx.handle();",
+          "const text = payload.trim() + '|HANDLE=' + handle;",
           "const sum = ctx.util.checksum(text);",
-          "const out = ctx.util.hex3(sum);",
-          "ctx.print(out);",
+          "const key3 = ctx.util.hex3(sum);",
+          "ctx.print(handle);",
+          "ctx.print(String(word).trim());",
+          "ctx.print(key3);",
+          "ctx.print(handle + ' ' + String(word).trim() + ' ' + String(home).trim() + ' ' + key3);",
         ].join("\n"),
       },
       "message.txt": {
@@ -2402,19 +2443,24 @@ const LOCS = {
     requirements: {},
     locks: [
       {
-        prompt: "LOCK: provide handle tag (KEY1)",
-        answer: () => handleTag(),
-        hint: "Key 1 is HANDLE=<your_handle>. Script: ctx.print('HANDLE=' + ctx.handle()).",
+        prompt: "LOCK: provide handle (KEY1)",
+        answer: () => trainingKey1(),
+        hint: "Key 1 is your handle. Script: ctx.print(ctx.handle()).",
       },
       {
-        prompt: "LOCK: provide joined text (KEY2)",
-        answer: () => primerTextForHandle(PRIMER_PAYLOAD),
-        hint: "Key 2 is payload|HANDLE=<your_handle> from primer.dat.",
+        prompt: "LOCK: provide word (KEY2)",
+        answer: () => trainingKey2(),
+        hint: "Key 2 is the word in primer.dat (word=...).",
       },
       {
         prompt: "LOCK: provide checksum (KEY3, hex3)",
-        answer: () => expectedForChecksumPayload(PRIMER_PAYLOAD),
-        hint: "Checksum the joined text. See script.intro or chk.example.",
+        answer: () => trainingKey3(),
+        hint: "Key 3 is hex3(checksum(payload|HANDLE=<your_handle>)).",
+      },
+      {
+        prompt: "LOCK: provide full phrase (KEY1 KEY2 HOME KEY3)",
+        answer: () => trainingPhrase(),
+        hint: "Combine keys: <handle> <word> <home> <key3>.",
       },
     ],
     links: ["home.hub"],
@@ -2426,17 +2472,18 @@ const LOCS = {
           "If you cleared this, you're ready to leave the lab.",
           "Next: connect public.exchange, pull tools, breach gates.",
           "",
-          "You just solved three keys. Combine them for a full phrase:",
-          "  KEY1 :: KEY2 :: KEY3",
-          "Keep that habit. Complex locks are just small keys in order.",
+          "You just solved three keys, then the full phrase:",
+          "  <handle> WELCOME HOME <hex3>",
+          "Keep that habit: small keys combine into a single answer.",
           "",
           "Tip: write helper scripts.",
           "",
           "Example outline (NOT literal code):",
           "  - read primer.dat",
-          "  - extract `payload=` line",
-          "  - append your handle",
-          "  - checksum + hex3 -> print",
+          "  - print handle (KEY1)",
+          "  - print word (KEY2)",
+          "  - checksum -> print KEY3",
+          "  - print final phrase",
           "",
           "Fast path: `edit chk --example` then `:wq`.",
           "Or: `cat chk.example` and paste ONLY the code into `edit chk`.",
@@ -4569,13 +4616,14 @@ const TUTORIAL_STEPS = [
   {
     id: "t_training",
     title: "Open The Training Node",
-    hint: "Run `breach training.node`, then `unlock <key1>`, `unlock <key2>`, `unlock <key3>`, then `connect training.node`.",
+    hint:
+      "Run `breach training.node`, then `unlock <handle>`, `unlock WELCOME`, `unlock <hex3>`, `unlock <handle> WELCOME HOME <hex3>`, then `connect training.node`.",
     check: () => state.unlocked.has("training.node") && state.loc === "training.node",
     onStart: () =>
       chatPost({
         channel: "#kernel",
         from: "switchboard",
-        body: "Use the three keys from primer.dat + script.intro to open `training.node`. No guessing.",
+        body: "Use the three keys + final phrase from primer.dat/script.intro to open `training.node`.",
       }),
   },
   {
