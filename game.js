@@ -3989,7 +3989,9 @@ function finishEditor(save) {
     return;
   }
   const normalizedLines = (editor.lines || []).map((line) => {
-    const raw = String(line || "").replace(/\uFEFF/g, "");
+    const raw = String(line || "")
+      .replace(/\uFEFF/g, "")
+      .replace(/\r/g, "");
     // If the user types "@sec FULLSEC" without the comment prefix, auto-fix it.
     const m = raw.match(/^\s*@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)\s*$/i);
     if (m) return `// @sec ${m[1].toUpperCase()}`;
@@ -4850,6 +4852,20 @@ input.addEventListener("keydown", (event) => {
     event.preventDefault();
     completeInput();
   }
+});
+
+// In editor mode, allow multi-line paste: split clipboard text into lines.
+input.addEventListener("paste", (event) => {
+  if (!state.editor) return;
+  const text = event.clipboardData ? event.clipboardData.getData("text") : "";
+  if (!text) return;
+  event.preventDefault();
+  event.stopPropagation();
+
+  const lines = String(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  lines.forEach((line) => state.editor.lines.push(line));
+  input.value = "";
+  writeLine(`pasted ${lines.length} line(s) into editor`, "dim");
 });
 
 // Don't steal focus when users are selecting/copying text from the terminal/chat.
