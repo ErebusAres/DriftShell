@@ -14,6 +14,8 @@ A local, single-player game inspired by hackmud's terminal aesthetic and script-
 - Type `help` for commands.
 - Start with `scan`, then `connect public.exchange`.
 - Use `ls`, `cat`, and `download` to pick up `.s` scripts, then `call <script>` to run them.
+- Most readable files can be downloaded too; use `drive` to list them and `cat drive:<loc>/<file>` to open.
 - Use `breach <loc>` and `unlock <answer>` to clear lock stacks.
 - Use `decode rot13` / `decode b64` after reading cipher files.
+- Optional: once you find `relay.uplink`, you can `upload` scripts/files back into the net (and track them with `uploads`).
 - Saves: autosave + `save` / `load` (browser localStorage), plus `export` / `import` for backups/cross-browser.

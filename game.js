@@ -13,6 +13,7 @@ const SAVE_KEY = `${GAME_ID}_save_v1`;
 const SEC_LEVELS = ["NULLSEC", "LOWSEC", "MIDSEC", "HIGHSEC", "FULLSEC"];
 const PRIMER_PAYLOAD = "DRIFTLOCAL::SEED=7|11|23|5|13|2";
 const WARDEN_PAYLOAD = "WARDEN::PHASE=1|KEY=RELIC|TRACE=4";
+const UPLINK_PAYLOAD = "UPLINK::PATCH=1|RELAY=MIRROR";
 const UPGRADE_DEFS = {
   "upg.trace_spool": {
     name: "trace_spool",
@@ -79,6 +80,8 @@ const NON_DIRTY_COMMANDS = new Set([
   "scripts",
   "ls",
   "downloads",
+  "drive",
+  "uploads",
   "inventory",
   "channels",
   "contacts",
@@ -657,6 +660,21 @@ function npcReply(npcId, body) {
       });
       return;
     }
+    if (msg.includes("upload") || msg.includes("uplink")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body:
+          "Uploads are how you push your work back into the net. Connect `relay.uplink` to unlock remote upload routing.",
+      });
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "switchboard",
+        body:
+          "Flow: `drive` to list downloaded files; `upload drive:loc/file relay.uplink` or `upload <you>.patch patch.s`. Track with `uploads`.",
+      });
+      return;
+    }
     chatPost({
       channel: dmChannel(npcId),
       from: "switchboard",
@@ -901,8 +919,10 @@ const state = {
   discovered: new Set(["home.hub", "training.node", "public.exchange", "sable.gate"]),
   unlocked: new Set(["home.hub", "public.exchange"]),
   inventory: new Set(),
+  drive: {},
   kit: {},
   userScripts: {},
+  uploads: {},
   flags: new Set(),
   marks: new Set(),
   upgrades: new Set(),
@@ -1101,12 +1121,12 @@ const LOCS = {
           name: "tracer",
           sec: "FULLSEC",
           code: [
-            "// @sec FULLSEC",
-            "ctx.print('Tracer online. Mesh resolving...');",
-            "ctx.flag('trace_open');",
-            "ctx.discover(['archives.arc','pier.gate']);",
-          ].join("\n"),
-        },
+             "// @sec FULLSEC",
+             "ctx.print('Tracer online. Mesh resolving...');",
+             "ctx.flag('trace_open');",
+             "ctx.discover(['archives.arc','pier.gate','relay.uplink']);",
+           ].join("\n"),
+         },
         content: [
           "/* tracer.s */",
           "function main(ctx,args){",
@@ -1292,6 +1312,74 @@ const LOCS = {
           "function main(ctx,args){",
           "  // Split a relay channel to expose the core.",
           "}",
+        ].join("\n"),
+      },
+    },
+  },
+  "relay.uplink": {
+    title: "RELAY/UPLINK",
+    desc: [
+      "A maintenance uplink. Half-dead, still listening.",
+      "It accepts payloads like it misses being useful.",
+    ],
+    requirements: { flags: ["trace_open"] },
+    locks: [],
+    links: ["public.exchange", "sable.gate", "archives.arc"],
+    files: {
+      "uplink.req": {
+        type: "text",
+        content: [
+          "RELAY.UPLINK :: PATCH SLOT",
+          "",
+          "This node accepts uploads. Think: you push a payload, the net runs it, the door blinks.",
+          "",
+          "Goal: craft a script that prints the expected checksum for your handle.",
+          "",
+          "payload=" + UPLINK_PAYLOAD,
+          "text = payload + '|HANDLE=<your_handle>'",
+          "expected = checksum(text) formatted as 3-hex (uppercase)",
+          "",
+          "Suggested flow:",
+          "  edit patch",
+          "  (write code that computes the checksum and ctx.print()s it)",
+          "  :wq",
+          "  upload <your_handle>.patch patch.s",
+          "  call scripts.trust.uplink.sync",
+          "",
+          "Note: this is optional. It's a clean way to practice: scripts + uploads + verification.",
+        ].join("\n"),
+      },
+    },
+  },
+  "mirror.gate": {
+    title: "MIRROR/GATE",
+    desc: [
+      "A thin door in the Drift. A reflection that doesn't match you.",
+      "It only opens for operators who can prove they compute instead of guess.",
+    ],
+    requirements: { flags: ["uplink_patched"] },
+    locks: [],
+    links: ["relay.uplink", "sable.gate"],
+    files: {
+      "mirror.log": {
+        type: "text",
+        content: [
+          "MIRROR.GATE",
+          "",
+          "Behind the maintenance uplink is a soft door nobody wrote down.",
+          "It doesn't care about your badge or your mask.",
+          "It cares that you can reproduce a value on demand.",
+          "",
+          "If the Drift can make you do that, it can make you do worse.",
+        ].join("\n"),
+      },
+      "coolant.upg": {
+        type: "upgrade",
+        item: "upg.coolant",
+        content: [
+          "UPG.COOLANT",
+          "A cold pack for your mistakes.",
+          "Install to reduce current TRACE by 2.",
         ].join("\n"),
       },
     },
@@ -1682,7 +1770,14 @@ function globToRegex(glob) {
 }
 
 function isDownloadableEntry(entry) {
-  return entry && (entry.type === "item" || entry.type === "script" || entry.type === "upgrade");
+  if (!entry) return false;
+  if (entry.downloadable === false) return false;
+  return (
+    entry.type === "item" ||
+    entry.type === "script" ||
+    entry.type === "upgrade" ||
+    entry.type === "text"
+  );
 }
 
 function entrySize(entry) {
@@ -1695,6 +1790,183 @@ function entrySize(entry) {
   return content.length;
 }
 
+function driveId(locName, fileName) {
+  return `${locName}/${fileName}`;
+}
+
+function driveRef(id) {
+  return `drive:${id}`;
+}
+
+function getDriveEntry(ref) {
+  const key = String(ref || "")
+    .trim()
+    .replace(/^drive:/i, "");
+  if (!key) return null;
+  const e = state.drive && state.drive[key];
+  if (!e) return null;
+  return { id: key, ...e };
+}
+
+function listDrive() {
+  writeLine("DRIVE", "header");
+  const keys = Object.keys(state.drive || {}).sort();
+  if (!keys.length) {
+    writeLine("(empty)", "dim");
+    writeLine("Tip: `download cipher.txt` then `cat drive:sable.gate/cipher.txt`", "dim");
+    return;
+  }
+  keys.slice(0, 40).forEach((k) => {
+    const e = state.drive[k];
+    const bytes = new TextEncoder().encode(String((e && e.content) || "")).length;
+    writeLine(`${driveRef(k)}  (${bytes} bytes)`, "dim");
+  });
+  if (keys.length > 40) writeLine("...", "dim");
+}
+
+function ensureUploadsBucket(locName) {
+  if (!state.uploads || typeof state.uploads !== "object") state.uploads = {};
+  const cur = state.uploads[locName];
+  if (!cur || typeof cur !== "object") {
+    state.uploads[locName] = { files: {} };
+    return state.uploads[locName];
+  }
+  if (!cur.files || typeof cur.files !== "object") cur.files = {};
+  return cur;
+}
+
+function uploadTargetInfo(locName) {
+  const bucket = ensureUploadsBucket(locName);
+  const keys = Object.keys(bucket.files || {}).sort();
+  return { bucket, keys };
+}
+
+function listUploads() {
+  writeLine("UPLOADS", "header");
+  const locs = Object.keys(state.uploads || {}).sort();
+  if (!locs.length) {
+    writeLine("(none)", "dim");
+    writeLine("Tip: connect relay.uplink then `upload <script> relay.uplink`", "dim");
+    return;
+  }
+  locs.forEach((locName) => {
+    const { keys } = uploadTargetInfo(locName);
+    if (!keys.length) return;
+    writeLine(locName, "dim");
+    keys.slice(0, 20).forEach((k) => {
+      const u = state.uploads[locName].files[k];
+      const tag = u && u.edited ? " edited" : "";
+      const hash = u && u.hash ? ` ${u.hash}` : "";
+      writeLine(`- ${k}${hash}${tag}`, "dim");
+    });
+    if (keys.length > 20) writeLine("...", "dim");
+  });
+}
+
+function resolveUploadSource(source) {
+  const s = String(source || "").trim();
+  if (!s) return null;
+
+  const drive = getDriveEntry(s);
+  if (drive) {
+    return {
+      kind: "text",
+      name: drive.name,
+      content: String(drive.content || ""),
+      edited: false,
+      detail: driveRef(drive.id),
+    };
+  }
+
+  const script = resolveScript(s);
+  if (script && script.owner !== "scripts.trust") {
+    return {
+      kind: "script",
+      name: `${script.name}.s`,
+      content: String(script.code || ""),
+      sec: script.sec,
+      edited: script.owner !== "kit",
+      detail: `${script.owner === "kit" ? "kit" : state.handle}.${script.name}`,
+    };
+  }
+
+  return null;
+}
+
+function uploadCommand(args) {
+  const a = args || [];
+  const source = a[0];
+  if (!source) {
+    writeLine("Usage: upload <drive:loc/file|script> [loc|file|loc:file] [file]", "warn");
+    return;
+  }
+
+  const src = resolveUploadSource(source);
+  if (!src) {
+    writeLine("Upload source not found. Tip: `drive` or `scripts`.", "warn");
+    return;
+  }
+
+  let destLoc = state.loc;
+  let destFile = null;
+
+  if (a.length >= 3) {
+    destLoc = a[1];
+    destFile = a[2];
+  } else if (a.length === 2) {
+    const target = String(a[1] || "").trim();
+    if (target.includes(":")) {
+      const parts = target.split(":", 2);
+      destLoc = parts[0] || destLoc;
+      destFile = parts[1] || null;
+    } else if (getLoc(target)) {
+      destLoc = target;
+    } else {
+      destFile = target;
+    }
+  }
+
+  if (!destFile) destFile = src.name || "upload.bin";
+
+  const loc = getLoc(destLoc);
+  if (!loc) {
+    writeLine("Loc not found.", "error");
+    return;
+  }
+  if (!state.discovered.has(destLoc)) {
+    writeLine("Loc not discovered.", "warn");
+    return;
+  }
+  if (!state.unlocked.has(destLoc)) {
+    writeLine("Loc locked. Breach it first.", "warn");
+    return;
+  }
+
+  if (destLoc !== state.loc && state.loc !== "relay.uplink") {
+    writeLine("Remote upload requires `connect relay.uplink`.", "warn");
+    return;
+  }
+
+  const content = String(src.content || "");
+  const hash = hex3(checksumUtf8Mod4096(content));
+  const bucket = ensureUploadsBucket(destLoc);
+  bucket.files[destFile] = {
+    kind: src.kind,
+    from: state.handle,
+    detail: src.detail,
+    sec: src.sec || null,
+    edited: !!src.edited,
+    bytes: new TextEncoder().encode(content).length,
+    hash,
+    content,
+    uploadedAt: Date.now(),
+  };
+
+  writeLine(`uploaded ${src.detail} -> ${destLoc}/${destFile} (${hash})`, "ok");
+  markDirty();
+  storyChatTick();
+}
+
 function scheduleDownload(locName, fileName) {
   const loc = getLoc(locName);
   const entry = loc && loc.files && loc.files[fileName];
@@ -1704,6 +1976,7 @@ function scheduleDownload(locName, fileName) {
   if (entry.type === "item" && state.inventory.has(entry.item)) return false;
   if (entry.type === "upgrade" && state.inventory.has(entry.item)) return false;
   if (entry.type === "script" && state.kit[entry.script.name]) return false;
+  if (entry.type === "text" && state.drive[driveId(locName, fileName)]) return false;
 
   const alreadyQueued =
     (state.downloads.active &&
@@ -1782,6 +2055,16 @@ function completeActiveDownload() {
     };
     writeLine(`download complete: ${active.file} -> kit.${entry.script.name}`, "ok");
     state.marks.add("mark.download");
+  } else if (entry.type === "text") {
+    const id = driveId(active.loc, active.file);
+    state.drive[id] = {
+      loc: active.loc,
+      name: active.file,
+      content: String(entry.content || ""),
+      cipher: !!entry.cipher,
+      downloadedAt: Date.now(),
+    };
+    writeLine(`download complete: ${active.file} -> ${driveRef(id)}`, "ok");
   }
   markDirty();
 
@@ -1853,10 +2136,27 @@ function downloadsStatus() {
 }
 
 function readFile(name) {
+  const drive = getDriveEntry(name);
+  if (drive) {
+    writeBlock(drive.content, "dim");
+    if (drive.cipher) state.lastCipher = drive.content;
+    return;
+  }
   const loc = getLoc(state.loc);
   const entry = loc.files[name];
   if (!entry) {
-    writeLine("File not found.", "error");
+    const script = resolveScript(name);
+    if (!script) {
+      writeLine("File not found.", "error");
+      return;
+    }
+    writeLine(`${script.owner}.${script.name} [${script.sec}]`, "header");
+    if (script.owner === "scripts.trust") {
+      writeLine("BUILTIN :: source not exposed", "dim");
+      writeLine(`Run: call ${script.owner}.${script.name}`, "dim");
+      return;
+    }
+    writeBlock(String(script.code || ""), "dim");
     return;
   }
   writeBlock(entry.content, "dim");
@@ -1954,8 +2254,10 @@ function resetToFreshState(keepChat) {
   state.discovered = new Set(["home.hub", "training.node", "public.exchange", "sable.gate"]);
   state.unlocked = new Set(["home.hub", "public.exchange"]);
   state.inventory = new Set();
+  state.drive = {};
   state.kit = {};
   state.userScripts = {};
+  state.uploads = {};
   state.flags = new Set();
   state.marks = new Set();
   state.upgrades = new Set();
@@ -2016,14 +2318,14 @@ const TUTORIAL_STEPS = [
   {
     id: "t_edit",
     title: "Write Your First Script",
-    hint: "Run `edit chk`, paste a checksum helper, then `:wq` to save.",
+    hint: "Run `edit chk --example`, then `:wq` to save.",
     check: () => state.marks.has("mark.edit"),
     onStart: () =>
       chatPost({
         channel: "#kernel",
         from: "switchboard",
         body:
-          "Write a helper script named `chk`. Use `ctx.read('primer.dat')` to get the payload, compute checksum, then `ctx.print(hex)`.",
+          "Make a helper script named `chk`. Easiest: `edit chk --example` then `:wq`. You can inspect it with `cat <your_handle>.chk`.",
       }),
   },
   {
@@ -2443,6 +2745,82 @@ const trustScripts = {
     sec: "FULLSEC",
     run: () => listMarks(),
   },
+  "scripts.trust.uplink.sync": {
+    owner: "scripts.trust",
+    name: "uplink.sync",
+    sec: "MIDSEC",
+    run: (ctx) => {
+      if (!state.unlocked.has("relay.uplink")) {
+        ctx.print("uplink offline.");
+        return;
+      }
+
+      const bucket = ensureUploadsBucket("relay.uplink");
+      const up = bucket.files["patch.s"];
+      if (!up) {
+        ctx.print("No patch uploaded.");
+        ctx.print("Flow: connect relay.uplink; edit patch; upload <you>.patch patch.s; call scripts.trust.uplink.sync");
+        return;
+      }
+      if (up.kind !== "script") {
+        ctx.print("patch.s must be a script upload.");
+        return;
+      }
+
+      const expected = expectedForChecksumPayload(UPLINK_PAYLOAD);
+      const out = [];
+      const sandbox = {
+        print: (msg) => out.push(String(msg)),
+        scratch: () => {},
+        handle: () => String(state.handle || "ghost"),
+        util: {
+          checksum: (text) => checksumUtf8Mod4096(text),
+          hex3: (n) => hex3(n),
+        },
+        files: () => [],
+        read: () => null,
+        discover: () => {},
+        flag: () => {},
+        flagged: () => false,
+        addItem: () => {},
+        hasItem: () => false,
+        call: () => {},
+        loc: () => "relay.uplink",
+      };
+
+      let firstLine = "";
+      try {
+        const fn = new Function("ctx", "args", `"use strict";\n${String(up.content || "")}`);
+        fn(sandbox, { _: [] });
+        firstLine = String(out.join("\n").split("\n")[0] || "").trim().toUpperCase();
+      } catch (err) {
+        ctx.print("Patch crashed: " + err.message);
+        return;
+      }
+
+      if (firstLine !== expected) {
+        ctx.print("Patch rejected.");
+        ctx.print("Hint: print checksum(payload + '|HANDLE=' + ctx.handle()) as 3-hex.");
+        ctx.print("See uplink.req for payload.");
+        return;
+      }
+
+      if (!state.flags.has("uplink_patched")) {
+        state.flags.add("uplink_patched");
+        discover(["mirror.gate"]);
+        state.unlocked.add("mirror.gate");
+        ctx.print("Patch accepted. Mirror route exposed.");
+        chatPost({
+          channel: dmChannel("switchboard"),
+          from: "switchboard",
+          body: "Uplink took your patch. New door: `mirror.gate`. Optional, but it pays in confidence.",
+        });
+        markDirty();
+      } else {
+        ctx.print("Already patched.");
+      }
+    },
+  },
   "scripts.trust.chats.send": {
     owner: "scripts.trust",
     name: "chats.send",
@@ -2719,6 +3097,15 @@ function storyChatTick() {
     });
     return;
   }
+  if (state.flags.has("trace_open") && state.discovered.has("relay.uplink") && !state.flags.has("chat_uplink")) {
+    state.flags.add("chat_uplink");
+    chatPost({
+      channel: "#kernel",
+      from: "switchboard",
+      body: "Optional route: `relay.uplink` (breach it; no locks). It supports `upload` and a verification gate.",
+    });
+    return;
+  }
   if (state.flags.has("slipper_signal") && !state.flags.has("chat_slipper")) {
     state.flags.add("chat_slipper");
     const added = discover(["slipper.hole"]);
@@ -2733,12 +3120,7 @@ function storyChatTick() {
   }
   if (state.unlocked.has("monument.beacon") && !state.flags.has("chat_beacon")) {
     state.flags.add("chat_beacon");
-    chatPost({
-      channel: "#kernel",
-      from: "monument",
-      body: "IN RISK WE TRUST",
-      kind: "trust",
-    });
+    writeLine("monument:: IN RISK WE TRUST", "trust");
     return;
   }
   if (state.flags.has("q_juniper_mask") && !state.flags.has("chat_juniper_contract")) {
@@ -2920,6 +3302,13 @@ function connectLoc(locName) {
     if (locName === "archives.arc") {
       npcIntroduce("archivist");
     }
+    if (locName === "relay.uplink") {
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Uplink is live. Read `uplink.req`. Then try: `edit patch`, `upload <you>.patch patch.s`, `call scripts.trust.uplink.sync`.",
+      });
+    }
     if (locName === "weaver.den") {
       npcIntroduce("weaver");
     }
@@ -2933,11 +3322,32 @@ function connectLoc(locName) {
   }
 }
 
-function setEditor(name) {
-  state.editor = { name, lines: [] };
+function getLocFileText(locName, fileName) {
+  const loc = getLoc(locName);
+  const entry = loc && loc.files && loc.files[String(fileName || "").trim()];
+  if (!entry) return null;
+  if (typeof entry.content === "string") return entry.content;
+  return String(entry.content || "");
+}
+
+function readAnyText(ref) {
+  const drive = getDriveEntry(ref);
+  if (drive) return String(drive.content || "");
+  const loc = getLoc(state.loc);
+  const entry = loc && loc.files && loc.files[String(ref || "").trim()];
+  if (!entry) return null;
+  if (typeof entry.content === "string") return entry.content;
+  return String(entry.content || "");
+}
+
+function setEditor(name, options) {
+  const opts = options || {};
+  const prefill = typeof opts.prefill === "string" ? opts.prefill : null;
+  state.editor = { name, lines: prefill ? String(prefill).split("\n") : [] };
   writeLine("EDITOR MODE :: type :wq to save, :q to abort", "warn");
   writeLine(`Editing ${state.handle}.${name}`, "dim");
   writeLine("Tip: add `// @sec FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC`", "dim");
+  if (prefill) writeLine("Loaded template. Edit, then `:wq`.", "dim");
 }
 
 function finishEditor(save) {
@@ -2964,8 +3374,10 @@ function getSaveData() {
     discovered: Array.from(state.discovered),
     unlocked: Array.from(state.unlocked),
     inventory: Array.from(state.inventory),
+    drive: state.drive,
     kit: state.kit,
     userScripts: state.userScripts,
+    uploads: state.uploads,
     flags: Array.from(state.flags),
     marks: Array.from(state.marks),
     upgrades: Array.from(state.upgrades),
@@ -3014,8 +3426,10 @@ function loadState(options) {
   state.discovered = new Set(data.discovered || []);
   state.unlocked = new Set(data.unlocked || []);
   state.inventory = new Set(data.inventory || []);
+  state.drive = data.drive && typeof data.drive === "object" ? data.drive : {};
   state.kit = data.kit || {};
   state.userScripts = data.userScripts || {};
+  state.uploads = data.uploads && typeof data.uploads === "object" ? data.uploads : {};
   state.flags = new Set(data.flags || []);
   state.marks = new Set(data.marks || []);
   state.upgrades = new Set(data.upgrades || []);
@@ -3086,6 +3500,23 @@ function listJobs() {
       title: "Token Proof",
       status: "[READY]",
       detail: "Bring `token.key` to weaver.den and `turnin token` (+upg.trace_spool).",
+    });
+  }
+
+  if (state.discovered.has("relay.uplink") && !state.flags.has("uplink_patched")) {
+    const hasPatch = !!(
+      state.uploads &&
+      state.uploads["relay.uplink"] &&
+      state.uploads["relay.uplink"].files &&
+      state.uploads["relay.uplink"].files["patch.s"]
+    );
+    jobs.push({
+      id: "uplink",
+      npc: "switchboard",
+      title: "Uplink Patch",
+      status: hasPatch ? "[READY]" : "[ACTIVE]",
+      detail:
+        "Breach + connect `relay.uplink`, read `uplink.req`, then `edit patch`, `upload <you>.patch patch.s`, `call scripts.trust.uplink.sync` (+mirror route).",
     });
   }
 
@@ -3261,11 +3692,46 @@ function handleCommand(inputText) {
           writeLine("Single file: `download tracer.s`", "dim");
           writeLine("Wildcard: `download *.s` (only works for `download`)", "dim");
           writeLine("Queue status: `downloads`", "dim");
+          writeLine("Text files download to drive: `drive` then `cat drive:loc/file`", "dim");
           if (wantsArgs) {
             writeLine("Wildcard rules:", "header");
             writeLine("`*` matches any run of characters; `?` matches one character.", "dim");
             writeLine("Globs only apply to `download` (not `cat`, not `breach`).", "dim");
           }
+          break;
+        }
+
+        if (topic === "cat") {
+          writeLine("help cat", "header");
+          writeLine("Read a file in the current loc: `cat primer.dat`", "dim");
+          writeLine("Read a downloaded text file: `cat drive:sable.gate/cipher.txt`", "dim");
+          writeLine("View script source: `cat kit.tracer` or `cat <your_handle>.chk`", "dim");
+          break;
+        }
+
+        if (topic === "edit") {
+          writeLine("help edit", "header");
+          writeLine("Create or overwrite a script: `edit chk` then `:wq`", "dim");
+          writeLine("Load the checksum template: `edit chk --example`", "dim");
+          writeLine("Or: `edit chk --from chk.example`", "dim");
+          break;
+        }
+
+        if (topic === "drive") {
+          writeLine("help drive", "header");
+          writeLine("List downloaded text/cipher files: `drive`", "dim");
+          writeLine("Read one: `cat drive:sable.gate/cipher.txt`", "dim");
+          writeLine("Tip: cipher files set your decode buffer (like `cat` does).", "dim");
+          break;
+        }
+
+        if (topic === "upload" || topic === "uploads") {
+          writeLine("help upload", "header");
+          writeLine("Upload a local script or drive file back into a loc.", "dim");
+          writeLine("Upload (current loc): `upload drive:sable.gate/cipher.txt note.txt`", "dim");
+          writeLine("Upload a script: `upload <your_handle>.patch patch.s`", "dim");
+          writeLine("Remote upload: connect `relay.uplink` then `upload <src> some.loc:file`", "dim");
+          writeLine("View uploads: `uploads`", "dim");
           break;
         }
 
@@ -3297,6 +3763,7 @@ function handleCommand(inputText) {
           "  scan | probe <loc> | connect <loc>",
           "  breach <loc> | unlock <answer> | wait",
           "  ls | cat <file> | download <file|glob> | downloads",
+          "  drive | upload <src> [loc|file|loc:file] [file] | uploads",
           "  scripts | call <script> [args] | edit <name> | decode rot13|b64 [text]",
           "  say <text> | join #chan | switch #chan | channels | tell <npc> <msg>",
           "  inventory | install <upgrade> | marks | jobs | turnin <mask|token>",
@@ -3328,7 +3795,30 @@ function handleCommand(inputText) {
         writeLine("Usage: edit <name>", "warn");
         break;
       }
-      setEditor(args[0]);
+      {
+        const name = args[0];
+        let from = null;
+        for (let i = 1; i < args.length; i++) {
+          const a = String(args[i] || "");
+          if (a === "--example") from = "chk.example";
+          if (a === "--from" && args[i + 1]) {
+            from = String(args[i + 1]);
+            i += 1;
+          }
+          if (a.startsWith("--from=")) from = a.slice("--from=".length);
+        }
+
+        const template = from
+          ? readAnyText(from) || getLocFileText("home.hub", from)
+          : null;
+        if (from && !template) {
+          writeLine("Template not found.", "warn");
+          writeLine("Tip: at home.hub: `cat chk.example`", "dim");
+          setEditor(name);
+          break;
+        }
+        setEditor(name, template ? { prefill: template } : undefined);
+      }
       break;
     case "scan":
       runScript("scripts.trust.scan", { _: [] });
@@ -3381,6 +3871,15 @@ function handleCommand(inputText) {
       break;
     case "downloads":
       downloadsStatus();
+      break;
+    case "drive":
+      listDrive();
+      break;
+    case "upload":
+      uploadCommand(args);
+      break;
+    case "uploads":
+      listUploads();
       break;
     case "inventory":
       listInventory();
@@ -3738,6 +4237,15 @@ function allFileNames() {
   return uniqueSorted(Object.keys((loc && loc.files) || {}));
 }
 
+function allDriveRefs() {
+  return uniqueSorted(Object.keys(state.drive || {}).map((k) => driveRef(k)));
+}
+
+function allUploadSourceRefs() {
+  const scripts = allScriptNames().filter((n) => !String(n).startsWith("scripts.trust"));
+  return uniqueSorted([...allDriveRefs(), ...scripts]);
+}
+
 function allUpgradeNames() {
   return uniqueSorted(Array.from(state.inventory).filter((i) => i.startsWith("upg.")));
 }
@@ -3758,6 +4266,9 @@ function allCommandNames() {
     "cat",
     "download",
     "downloads",
+    "drive",
+    "upload",
+    "uploads",
     "inventory",
     "jobs",
     "turnin",
@@ -3803,7 +4314,9 @@ function completeInput() {
   let candidates = [];
   if (parts.length <= 1) {
     candidates = allCommandNames();
-  } else if (cmd === "cat" || cmd === "download") {
+  } else if (cmd === "cat") {
+    candidates = uniqueSorted([...allFileNames(), ...allDriveRefs(), ...allScriptNames()]);
+  } else if (cmd === "download") {
     candidates = allFileNames();
   } else if (cmd === "connect" || cmd === "breach") {
     candidates = allLocNames();
@@ -3811,6 +4324,9 @@ function completeInput() {
     candidates = allLocNames();
   } else if (cmd === "call" || cmd === "run") {
     candidates = allScriptNames();
+  } else if (cmd === "upload") {
+    if (parts.length === 2) candidates = allUploadSourceRefs();
+    else candidates = allLocNames();
   } else if (cmd === "decode") {
     candidates = ["rot13", "b64"];
   } else if (cmd === "install") {
