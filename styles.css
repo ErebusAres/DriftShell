@@ -578,6 +578,30 @@ section {
   text-transform: uppercase;
 }
 
+.cmd-chip {
+  display: inline-block;
+  margin: 0 6px 0 0;
+  padding: 2px 8px;
+  border: 1px solid rgba(150, 210, 255, 0.25);
+  border-radius: 2px;
+  background: rgba(10, 14, 18, 0.65);
+  color: var(--cyan);
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cmd-chip:hover {
+  border-color: var(--frame);
+  color: var(--text);
+}
+
+.cmd-chip:active {
+  transform: translateY(0.5px);
+}
+
 .tok {
   color: var(--cyan);
 }

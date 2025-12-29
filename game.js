@@ -700,6 +700,46 @@ function writeBlock(text, kind) {
     .forEach((line) => writeLine(line, kind));
 }
 
+function writeLineWithChips(prefixText, commands, kind) {
+  const line = document.createElement("div");
+  line.className = `line${kind ? " " + kind : ""}`;
+
+  if (prefixText) {
+    renderTerminalRich(line, String(prefixText));
+  }
+
+  (commands || []).forEach((cmd) => {
+    const c = String(cmd || "").trim();
+    if (!c) return;
+    line.appendChild(document.createTextNode(prefixText ? " " : ""));
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "cmd-chip";
+    btn.setAttribute("data-cmd", c);
+    btn.textContent = c;
+    line.appendChild(btn);
+    prefixText = ""; // only apply once
+  });
+
+  screen.appendChild(line);
+  screen.scrollTop = screen.scrollHeight;
+}
+
+function extractBacktickCommands(text) {
+  const raw = String(text || "");
+  const out = [];
+  const re = /`([^`]+)`/g;
+  let m;
+  while ((m = re.exec(raw))) {
+    const cmd = String(m[1] || "").trim();
+    // Only treat it like a command if it begins with a letter or slash.
+    if (!cmd) continue;
+    if (!/^[A-Za-z/]/.test(cmd)) continue;
+    out.push(cmd);
+  }
+  return Array.from(new Set(out));
+}
+
 function renderChat() {
   if (!chatLog) return;
   chatLog.innerHTML = "";
@@ -4367,6 +4407,8 @@ function tutorialStatus() {
     writeLine(`${done} ${step.title}${here}`, "dim");
     if (i === state.tutorial.stepIndex && state.tutorial.enabled) {
       writeLine("  " + step.hint, "dim");
+      const cmds = extractBacktickCommands(step.hint);
+      if (cmds.length) writeLineWithChips("  try:", cmds, "dim");
     }
   });
 }
@@ -4379,6 +4421,27 @@ function tutorialSetEnabled(enabled) {
   state.tutorial.enabled = Boolean(enabled);
   if (state.tutorial.enabled) tutorialAdvance();
   updateHud();
+}
+
+function submitTerminalCommand(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return;
+
+  writeLine(`${prompt.textContent} ${value}`, "dim");
+  state.history.push(value);
+  state.historyIndex = state.history.length;
+  try {
+    handleCommand(value);
+  } catch (err) {
+    // Keep UI responsive; surface the actual error to help debugging.
+    try {
+      // eslint-disable-next-line no-console
+      console.error(err);
+    } catch {}
+    const msg =
+      err && typeof err === "object" && "message" in err ? String(err.message) : String(err);
+    writeLine(`Command error: ${msg}`, "error");
+  }
 }
 
 function listInventory() {
@@ -6161,26 +6224,7 @@ input.addEventListener("keydown", (event) => {
     const raw = input.value;
     // Always clear immediately so the box empties even if command handling errors.
     input.value = "";
-    const value = String(raw || "").trim();
-    if (!value) return;
-
-    writeLine(`${prompt.textContent} ${value}`, "dim");
-    state.history.push(value);
-    state.historyIndex = state.history.length;
-    try {
-      handleCommand(value);
-    } catch (err) {
-      // Keep UI responsive; surface the actual error to help debugging.
-      try {
-        // eslint-disable-next-line no-console
-        console.error(err);
-      } catch {}
-      const msg =
-        err && typeof err === "object" && "message" in err
-          ? String(err.message)
-          : String(err);
-      writeLine(`Command error: ${msg}`, "error");
-    }
+    submitTerminalCommand(raw);
     return;
   }
 
@@ -6272,6 +6316,67 @@ document.addEventListener("click", (event) => {
   }
 });
 setTimeout(() => input.focus(), 0);
+
+const SAFE_SHIFT_RUN_CMDS = new Set([
+  "help",
+  "tutorial",
+  "scan",
+  "probe",
+  "connect",
+  "dc",
+  "disconnect",
+  "ls",
+  "cat",
+  "downloads",
+  "drive",
+  "history",
+  "scripts",
+  "contacts",
+  "channels",
+  "join",
+  "switch",
+  "tell",
+  "say",
+]);
+
+function cmdHead(cmd) {
+  return String(cmd || "")
+    .trim()
+    .split(/\s+/, 1)[0]
+    .toLowerCase();
+}
+
+function insertIntoCmdInput(command) {
+  input.value = String(command || "");
+  try {
+    input.focus();
+    const end = input.value.length;
+    input.setSelectionRange(end, end);
+  } catch {}
+}
+
+// Command chips in tutorial output.
+screen.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const btn = target.closest("button.cmd-chip");
+  if (!btn) return;
+  const cmd = btn.getAttribute("data-cmd") || "";
+  if (!cmd.trim()) return;
+
+  if (event.shiftKey) {
+    const head = cmdHead(cmd);
+    if (!SAFE_SHIFT_RUN_CMDS.has(head)) {
+      writeLine("Tip: chip inserted (Shift-run disabled for this command).", "dim");
+      insertIntoCmdInput(cmd);
+      return;
+    }
+    submitTerminalCommand(cmd);
+    return;
+  }
+
+  insertIntoCmdInput(cmd);
+});
 
 if (chatInput) {
   chatInput.addEventListener("keydown", (event) => {
