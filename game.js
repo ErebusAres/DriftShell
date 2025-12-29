@@ -1023,6 +1023,24 @@ async function mirrorDownloadToLocalFolder(locName, fileName, entry) {
   }
 }
 
+async function mirrorUserScriptToLocalFolder(scriptName, code) {
+  if (!supportsLocalFolder() || !window.isSecureContext) return;
+  if (!localFolderHandle) return;
+  const perm = await ensureLocalFolderPermission(true);
+  if (!perm.ok) {
+    writeLine("Local sync blocked: permission denied.", "warn");
+    await refreshLocalFolderUi();
+    return;
+  }
+  const name = String(scriptName || "").trim();
+  if (!name) return;
+  try {
+    await writeLocalMirrorFile(`${name}.s`, String(code || ""));
+  } catch (err) {
+    writeLine("Local script save failed: " + (err && err.message ? err.message : "error"), "warn");
+  }
+}
+
 function writeLine(text, kind) {
   const line = document.createElement("div");
   line.className = `line${kind ? " " + kind : ""}`;
@@ -5825,6 +5843,7 @@ function finishEditor(save) {
     type: "script",
     script: { name: editor.name, sec, code },
   });
+  void mirrorUserScriptToLocalFolder(editor.name, code);
   if (!mirrored.ok) {
     writeLine("sys::drive full (script not mirrored)", "warn");
     writeLine("Tip: buy/install `upg.drive_ext` or delete with `del drive:...`", "dim");
