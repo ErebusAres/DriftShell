@@ -58,6 +58,14 @@ body {
   letter-spacing: 0.02em;
 }
 
+/* Make selections visible and copy-friendly */
+#screen ::selection,
+#chat-log ::selection,
+#scratch-pad ::selection {
+  background: rgba(143, 233, 255, 0.22);
+  color: var(--text);
+}
+
 @keyframes corruptJitter {
   0% { transform: translate3d(0,0,0); }
   10% { transform: translate3d(0.2px,-0.2px,0); }
@@ -232,6 +240,7 @@ section {
   content: "";
   position: absolute;
   inset: 0;
+  z-index: 0;
   background:
     radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.06), transparent 55%),
     repeating-linear-gradient(
@@ -252,6 +261,10 @@ section {
   overflow-x: hidden;
   padding-right: 6px;
   user-select: text;
+  -webkit-user-select: text;
+  position: relative;
+  z-index: 1;
+  cursor: text;
 }
 
 #screen::-webkit-scrollbar {
@@ -269,6 +282,7 @@ section {
   border-top: 1px solid var(--line);
   padding-top: 10px;
   margin-top: 12px;
+  position: relative;
   z-index: 1;
 }
 
