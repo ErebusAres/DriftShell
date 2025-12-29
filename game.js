@@ -11,6 +11,9 @@ const LEGACY_SCRATCH_KEY_PREFIX = "hackterm_scratch_v1:";
 
 const SAVE_KEY = `${GAME_ID}_save_v1`;
 const SEC_LEVELS = ["NULLSEC", "LOWSEC", "MIDSEC", "HIGHSEC", "FULLSEC"];
+// Drive capacity is an in-world abstraction of browser localStorage limits.
+// Keep it comfortably below typical per-origin quotas (~5MB).
+const DRIVE_MAX_CAP_BYTES = 4_000_000;
 const PRIMER_PAYLOAD = "DRIFTLOCAL::SEED=7|11|23|5|13|2";
 const WARDEN_PAYLOAD = "WARDEN::PHASE=1|KEY=RELIC|TRACE=4";
 const UPLINK_PAYLOAD = "UPLINK::PATCH=1|RELAY=MIRROR";
@@ -53,14 +56,14 @@ const UPGRADE_DEFS = {
   "upg.drive_ext": {
     name: "drive_ext",
     apply: () => {
-      state.driveMax = (Number(state.driveMax) || 0) + 40_000;
+      state.driveMax = Math.min(DRIVE_MAX_CAP_BYTES, (Number(state.driveMax) || 0) + 40_000);
     },
-    describe: "Expands drive capacity for downloaded text/cipher files.",
+    describe: "Expands local drive capacity for downloaded files (scripts/items/text).",
   },
   "upg.drive_array": {
     name: "drive_array",
     apply: () => {
-      state.driveMax = (Number(state.driveMax) || 0) + 120_000;
+      state.driveMax = Math.min(DRIVE_MAX_CAP_BYTES, (Number(state.driveMax) || 0) + 120_000);
     },
     describe: "Large drive expansion for heavy ops.",
   },
@@ -1435,6 +1438,7 @@ const state = {
   editor: null,
   history: [],
   historyIndex: 0,
+  recent: { locs: [], files: [] },
   chat: {
     channel: "#kernel",
     channels: new Set(["#kernel"]),
@@ -2253,6 +2257,7 @@ function showLoc() {
   }
   writeLine(`:: ${state.loc} :: ${loc.title}`, "header");
   writeBlock(loc.desc.join("\n"), "dim");
+  trackRecentLoc(state.loc);
 }
 
 function listFiles() {
@@ -2273,7 +2278,7 @@ const STORE_ITEMS = [
     id: "upg.drive_ext",
     price: 80,
     when: () => true,
-    desc: "Drive expansion (store more downloaded text/ciphers).",
+    desc: "Drive expansion (more space for downloaded files).",
   },
   {
     id: "upg.drive_array",
@@ -2398,6 +2403,33 @@ function driveBytesUsed() {
   return total;
 }
 
+const RECENT_MAX = 40;
+function ensureRecentState() {
+  if (!state.recent || typeof state.recent !== "object") state.recent = { locs: [], files: [] };
+  if (!Array.isArray(state.recent.locs)) state.recent.locs = [];
+  if (!Array.isArray(state.recent.files)) state.recent.files = [];
+}
+
+function pushRecent(list, value) {
+  const v = String(value || "").trim();
+  if (!v) return;
+  const lower = v.toLowerCase();
+  const idx = list.findIndex((e) => e && String(e.v || "").toLowerCase() === lower);
+  if (idx !== -1) list.splice(idx, 1);
+  list.unshift({ t: Date.now(), v });
+  if (list.length > RECENT_MAX) list.length = RECENT_MAX;
+}
+
+function trackRecentLoc(locName) {
+  ensureRecentState();
+  pushRecent(state.recent.locs, String(locName || "").trim());
+}
+
+function trackRecentFile(fileRef) {
+  ensureRecentState();
+  pushRecent(state.recent.files, String(fileRef || "").trim());
+}
+
 function driveBytesForContent(content) {
   return new TextEncoder().encode(String(content || "")).length;
 }
@@ -2433,6 +2465,7 @@ function listDrive() {
     return;
   }
   writeLine(`capacity: ${driveBytesUsed()}/${state.driveMax} bytes`, "dim");
+  writeLine("note: drive is stored in browser localStorage", "dim");
   keys.slice(0, 40).forEach((k) => {
     const e = state.drive[k];
     const bytes = driveBytesForContent((e && e.content) || "");
@@ -2440,6 +2473,57 @@ function listDrive() {
     writeLine(`${driveRef(k)}  (${type}, ${bytes} bytes)`, "dim");
   });
   if (keys.length > 40) writeLine("...", "dim");
+}
+
+function listHistory(args) {
+  ensureRecentState();
+  const sub = String((args && args[0]) || "")
+    .trim()
+    .toLowerCase();
+
+  if (sub === "clear" || sub === "reset") {
+    state.recent = { locs: [], files: [] };
+    writeLine("history cleared", "ok");
+    markDirty();
+    return;
+  }
+
+  writeLine("HISTORY", "header");
+
+  const locs = state.recent.locs || [];
+  const files = state.recent.files || [];
+
+  writeLine("locs:", "dim");
+  if (!locs.length) writeLine("(none)", "dim");
+  locs.slice(0, 20).forEach((e) => {
+    const v = e && e.v ? String(e.v) : "";
+    if (!v) return;
+    const node = getLoc(v);
+    const title = node && node.title ? String(node.title) : "UNKNOWN";
+    writeLine(`${v} :: ${title}`, "dim");
+  });
+
+  writeLine("files:", "dim");
+  if (!files.length) writeLine("(none)", "dim");
+  files.slice(0, 25).forEach((e) => {
+    const v = e && e.v ? String(e.v) : "";
+    if (!v) return;
+
+    if (/^drive:/i.test(v)) {
+      const drive = getDriveEntry(v);
+      if (!drive) {
+        writeLine(`${v}  (missing)`, "dim");
+        return;
+      }
+      const bytes = driveBytesForContent((drive && drive.content) || "");
+      const type = drive && drive.type ? String(drive.type) : "file";
+      writeLine(`${driveRef(drive.id)}  (${type}, ${bytes} bytes)`, "dim");
+      return;
+    }
+    writeLine(v, "dim");
+  });
+
+  writeLine("Tip: `history clear` to wipe recent lists.", "dim");
 }
 
 function driveHas(id) {
@@ -2853,6 +2937,7 @@ function completeActiveDownload() {
     startNextDownloadIfIdle();
     return;
   }
+  trackRecentFile(driveRef(driveId(active.loc, active.file)));
 
   // Apply acquisition
   if (entry.type === "item") {
@@ -2948,6 +3033,7 @@ function readFile(name) {
   if (drive) {
     writeBlock(drive.content, "dim");
     if (drive.cipher) state.lastCipher = drive.content;
+    trackRecentFile(driveRef(drive.id));
     return;
   }
   const found = getLocFileEntry(state.loc, name);
@@ -2958,6 +3044,7 @@ function readFile(name) {
       return;
     }
     writeLine(`${script.owner}.${script.name} [${script.sec}]`, "header");
+    trackRecentFile(`${script.owner}.${script.name}`);
     if (script.owner === "scripts.trust") {
       writeLine("BUILTIN :: source not exposed", "dim");
       writeLine(`Run: call ${script.owner}.${script.name}`, "dim");
@@ -2978,6 +3065,7 @@ function readFile(name) {
   if (entry.cipher) {
     state.lastCipher = entry.content;
   }
+  trackRecentFile(`${state.loc}/${found.name}`);
 }
 
 function downloadFile(name) {
@@ -3233,6 +3321,7 @@ function resetToFreshState(keepChat) {
   state.editor = null;
   state.history = [];
   state.historyIndex = 0;
+  state.recent = { locs: [], files: [] };
   state.confirm = null;
   state.tutorial = { enabled: true, stepIndex: 0, completed: new Set() };
   state.npcs = { known: new Set(["switchboard"]) };
@@ -4451,6 +4540,7 @@ function getSaveData() {
     unlocked: Array.from(state.unlocked),
     inventory: Array.from(state.inventory),
     drive: state.drive,
+    recent: state.recent,
     kit: state.kit,
     userScripts: state.userScripts,
     uploads: state.uploads,
@@ -4507,13 +4597,23 @@ function loadState(options) {
   state.unlocked = new Set(data.unlocked || []);
   state.inventory = new Set(data.inventory || []);
   state.drive = data.drive && typeof data.drive === "object" ? data.drive : {};
+  state.recent =
+    data.recent && typeof data.recent === "object"
+      ? {
+          locs: Array.isArray(data.recent.locs) ? data.recent.locs.filter((e) => e && typeof e.v === "string") : [],
+          files: Array.isArray(data.recent.files) ? data.recent.files.filter((e) => e && typeof e.v === "string") : [],
+        }
+      : { locs: [], files: [] };
   state.kit = data.kit || {};
   state.userScripts = data.userScripts || {};
   state.uploads = data.uploads && typeof data.uploads === "object" ? data.uploads : {};
   state.flags = new Set(data.flags || []);
   state.marks = new Set(data.marks || []);
   state.upgrades = new Set(data.upgrades || []);
-  state.driveMax = Number(data.driveMax) > 0 ? Number(data.driveMax) : state.driveMax || 12_000;
+  state.driveMax = Math.min(
+    DRIVE_MAX_CAP_BYTES,
+    Number(data.driveMax) > 0 ? Number(data.driveMax) : state.driveMax || 12_000
+  );
   state.siphon =
     data.siphon && typeof data.siphon === "object"
       ? {
@@ -4844,6 +4944,14 @@ function handleCommand(inputText) {
           break;
         }
 
+        if (topic === "history") {
+          writeLine("help history", "header");
+          writeLine("Show recent locs/files you interacted with.", "dim");
+          writeLine("Run: `history`", "dim");
+          writeLine("Clear: `history clear`", "dim");
+          break;
+        }
+
         if (topic === "upload" || topic === "uploads") {
           writeLine("help upload", "header");
           writeLine("Upload a local script or drive file back into a loc.", "dim");
@@ -4902,7 +5010,7 @@ function handleCommand(inputText) {
           "  scan | probe <loc> | connect <loc>",
           "  breach <loc> | unlock <answer> | wait",
           "  ls | cat <file> | download <file|glob> | downloads",
-          "  drive | upload <src> [loc|file|loc:file] [file] | uploads",
+          "  drive | history | upload <src> [loc|file|loc:file] [file] | uploads",
           "  store | buy <item> | install <upgrade> | siphon ...",
           "  scripts | call <script> [args] | edit <name> | decode rot13|b64 [text]",
           "  say <text> | join #chan | switch #chan | channels | tell <npc> <msg>",
@@ -5018,6 +5126,9 @@ function handleCommand(inputText) {
       break;
     case "drive":
       listDrive();
+      break;
+    case "history":
+      listHistory(args);
       break;
     case "store":
       listStore();
@@ -5243,6 +5354,9 @@ function handleCommand(inputText) {
 }
 
 input.addEventListener("keydown", (event) => {
+  // Any non-Tab interaction cancels completion cycling.
+  if (event.key !== "Tab") clearTabState();
+
   if (event.key === "Enter") {
     event.preventDefault();
     event.stopPropagation();
@@ -5290,7 +5404,7 @@ input.addEventListener("keydown", (event) => {
 
   if (event.key === "Tab") {
     event.preventDefault();
-    completeInput();
+    completeInput({ direction: event.shiftKey ? -1 : 1 });
   }
 });
 
@@ -5450,6 +5564,7 @@ function allCommandNames() {
     "download",
     "downloads",
     "drive",
+    "history",
     "store",
     "buy",
     "upload",
@@ -5485,7 +5600,12 @@ function allCommandNames() {
   ];
 }
 
-function completeInput() {
+let tabState = null;
+function clearTabState() {
+  tabState = null;
+}
+
+function completeInput({ direction = 1 } = {}) {
   const text = input.value;
   const cursor = input.selectionStart ?? text.length;
   const before = text.slice(0, cursor);
@@ -5528,31 +5648,80 @@ function completeInput() {
     candidates = [];
   }
 
+  // Avoid dumping huge option lists when tabbing with no prefix.
+  if (!token) {
+    clearTabState();
+    return;
+  }
+
+  const contextKey = [
+    before.slice(0, tokenStart).toLowerCase(),
+    after.toLowerCase(),
+    String(cmd || "").toLowerCase(),
+  ].join("\u0000");
+
+  // If we're already cycling in this context, rotate regardless of the current token
+  // (because the token will be replaced by a full candidate on the first Tab press).
+  if (
+    tabState &&
+    tabState.contextKey === contextKey &&
+    tabState.tokenStart === tokenStart &&
+    Array.isArray(tabState.candidates) &&
+    tabState.candidates.length > 1 &&
+    tabState.candidates.some((c) => String(c).toLowerCase() === token.toLowerCase())
+  ) {
+    const len = tabState.candidates.length;
+    const delta = direction < 0 ? -1 : 1;
+    tabState.index = (tabState.index + delta + len) % len;
+    const pick = tabState.candidates[tabState.index];
+    input.value = before.slice(0, tokenStart) + pick + after;
+    const newCursor = tokenStart + pick.length;
+    input.setSelectionRange(newCursor, newCursor);
+    return;
+  }
+
   const filtered = candidates.filter((c) => c.toLowerCase().startsWith(token.toLowerCase()));
-  if (!filtered.length) return;
+  if (!filtered.length) {
+    clearTabState();
+    return;
+  }
   if (filtered.length === 1) {
     const next = filtered[0];
     input.value = before.slice(0, tokenStart) + next + after;
     const newCursor = tokenStart + next.length;
     input.setSelectionRange(newCursor, newCursor);
+    clearTabState();
     return;
   }
 
-  // Multiple matches: fill common prefix, then print options to screen.
-  let prefix = filtered[0];
-  for (let i = 1; i < filtered.length; i++) {
-    while (!filtered[i].toLowerCase().startsWith(prefix.toLowerCase()) && prefix.length) {
-      prefix = prefix.slice(0, -1);
-    }
-    if (!prefix.length) break;
+  // Multiple matches: cycle through candidates by priority/order.
+  // First Tab completes to the first candidate, next Tabs rotate (Shift+Tab reverses).
+  const normalized = filtered.map((c) => String(c));
+  const canReuse =
+    tabState &&
+    tabState.contextKey === contextKey &&
+    tabState.tokenStart === tokenStart &&
+    Array.isArray(tabState.candidates) &&
+    tabState.candidates.length === normalized.length &&
+    tabState.candidates.every((c, i) => c === normalized[i]);
+
+  if (!canReuse) {
+    tabState = {
+      contextKey,
+      tokenStart,
+      candidates: normalized,
+      index: 0,
+    };
+  } else {
+    const len = tabState.candidates.length;
+    const delta = direction < 0 ? -1 : 1;
+    tabState.index = (tabState.index + delta + len) % len;
   }
-  if (prefix.length > token.length) {
-    input.value = before.slice(0, tokenStart) + prefix + after;
-    const newCursor = tokenStart + prefix.length;
-    input.setSelectionRange(newCursor, newCursor);
-    return;
-  }
-  writeLine(filtered.join("    "), "dim");
+
+  const pick = tabState.candidates[tabState.index];
+  input.value = before.slice(0, tokenStart) + pick + after;
+  const newCursor = tokenStart + pick.length;
+  input.setSelectionRange(newCursor, newCursor);
 }
 
 function boot() {
