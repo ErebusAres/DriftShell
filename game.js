@@ -2262,14 +2262,40 @@ function showLoc() {
 
 function listFiles() {
   const loc = getLoc(state.loc);
-  const names = Object.keys(loc.files || {});
+  const base = Object.keys(loc.files || {});
+  const uploaded =
+    state.uploads && state.uploads[state.loc] && state.uploads[state.loc].files
+      ? Object.keys(state.uploads[state.loc].files)
+      : [];
+
+  const names = Array.from(new Set([...base, ...uploaded])).sort((a, b) => a.localeCompare(b));
   if (!names.length) {
     writeLine("No files.", "dim");
     return;
   }
   names.forEach((name) => {
-    const entry = loc.files[name];
-    writeLine(`${name} (${entry.type})`, "dim");
+    const entry = (loc.files || {})[name];
+    const up = state.uploads && state.uploads[state.loc] && state.uploads[state.loc].files
+      ? state.uploads[state.loc].files[name]
+      : null;
+
+    if (entry && up) {
+      const tag = up && up.kind ? String(up.kind) : "file";
+      const edited = up && up.edited ? " edited" : "";
+      writeLine(`${name} (${entry.type} + uploaded:${tag}${edited})`, "dim");
+      return;
+    }
+    if (entry) {
+      writeLine(`${name} (${entry.type})`, "dim");
+      return;
+    }
+    if (up) {
+      const tag = up && up.kind ? String(up.kind) : "file";
+      const edited = up && up.edited ? " edited" : "";
+      writeLine(`${name} (uploaded:${tag}${edited})`, "dim");
+      return;
+    }
+    writeLine(`${name} (file)`, "dim");
   });
 }
 
@@ -2475,8 +2501,8 @@ function getDriveEntry(ref) {
   return { id: found, ...drive[found] };
 }
 
-function listDriveFiles() {
-  writeLine("DRIVE // LIST", "header");
+function listDriveFilesFlat() {
+  writeLine("DRIVE // FLAT", "header");
   const keys = Object.keys(state.drive || {}).sort();
   if (!keys.length) {
     writeLine("(empty)", "dim");
@@ -2484,22 +2510,27 @@ function listDriveFiles() {
     return;
   }
   writeLine(`capacity: ${driveBytesUsed()}/${state.driveMax} bytes`, "dim");
-  keys.slice(0, 60).forEach((k) => {
+  keys.slice(0, 80).forEach((k) => {
     const e = state.drive[k];
     const bytes = driveBytesForContent((e && e.content) || "");
     const type = e && e.type ? String(e.type) : "file";
     writeLine(`${driveRef(k)}  (${type}, ${formatBytesShort(bytes)})`, "dim");
   });
-  if (keys.length > 60) writeLine("...", "dim");
+  if (keys.length > 80) writeLine("...", "dim");
 }
 
-function driveTree() {
+function driveTree(options) {
+  const opts = options || {};
+  const expanded = !!opts.expanded;
+  const showRefs = !!opts.showRefs;
+  const perTypeLimit = expanded ? 50 : 14;
+
   const keys = Object.keys(state.drive || {});
   const used = driveBytesUsed();
   const max = Number(state.driveMax) || 0;
   const pct = max > 0 ? Math.min(999, Math.floor((used / max) * 100)) : 0;
 
-  writeLine("DRIVE", "header");
+  writeLine(expanded ? "DRIVE // LS" : "DRIVE", "header");
   writeLine(`usage: ${used}/${max} bytes (${pct}%)`, "dim");
   writeLine("drive:/  (local)", "dim");
 
@@ -2551,21 +2582,24 @@ function driveTree() {
     list.forEach((x) => nameCounts.set(x.file.toLowerCase(), (nameCounts.get(x.file.toLowerCase()) || 0) + 1));
 
     list.sort((a, b) => a.file.localeCompare(b.file));
-    const show = list.slice(0, 14);
+    const show = list.slice(0, perTypeLimit);
     const branch = lastType ? "    " : "|   ";
     show.forEach((x, i) => {
       const lastFile = i === show.length - 1 && count <= show.length;
       const filePrefix = branch + (lastFile ? "`-- " : "|-- ");
       const dup = (nameCounts.get(x.file.toLowerCase()) || 0) > 1;
       const suffix = dup ? `${formatBytesShort(x.bytes)} (dup)` : formatBytesShort(x.bytes);
-      writeLine(driveTreeLine(filePrefix, x.file, `(${suffix})`), "dim");
+      const name = showRefs ? driveRef(x.id) : x.file;
+      writeLine(driveTreeLine(filePrefix, name, `(${suffix})`), "dim");
     });
     if (count > show.length) {
       writeLine(branch + "`-- " + `... (+${count - show.length} more)`, "dim");
     }
   });
 
-  writeLine("Tip: `drive ls` shows full `drive:...` refs for `cat`/`del`.", "dim");
+  if (!expanded) {
+    writeLine("Tip: `drive ls` to expand + show `drive:...` refs for `cat`/`del`.", "dim");
+  }
   writeLine("Tip: `history` shows where files came from.", "dim");
 }
 
@@ -2573,11 +2607,15 @@ function driveCommand(args) {
   const sub = String((args && args[0]) || "")
     .trim()
     .toLowerCase();
-  if (sub === "ls" || sub === "list") {
-    listDriveFiles();
+  if (sub === "ls") {
+    driveTree({ expanded: true, showRefs: true });
     return;
   }
-  driveTree();
+  if (sub === "flat") {
+    listDriveFilesFlat();
+    return;
+  }
+  driveTree({ expanded: false, showRefs: false });
 }
 
 function listHistory(args) {
@@ -2624,8 +2662,10 @@ function listHistory(args) {
       const type = drive && drive.type ? String(drive.type) : "file";
       const origin = String(drive.loc || "").trim();
       const originTitle = (getLoc(origin) && getLoc(origin).title) ? String(getLoc(origin).title) : "UNKNOWN";
-      const file = fileBaseName(drive.id) || String(drive.name || "file");
-      writeLine(`${file}  <= ${origin} :: ${originTitle}  [${driveRef(drive.id)}]  (${type}, ${formatBytesShort(bytes)})`, "dim");
+      writeLine(
+        `${driveRef(drive.id)}  (${type}, ${formatBytesShort(bytes)})  <= ${origin} :: ${originTitle}`,
+        "dim"
+      );
       return;
     }
 
@@ -2636,7 +2676,7 @@ function listHistory(args) {
       const file = parts.slice(1).join("/");
       const node = getLoc(loc);
       const title = node && node.title ? String(node.title) : "UNKNOWN";
-      writeLine(`${file}  <= ${loc} :: ${title}`, "dim");
+      writeLine(`${loc}/${file}  <= ${loc} :: ${title}`, "dim");
       return;
     }
 
@@ -2779,8 +2819,12 @@ function delCommand(args) {
     return;
   }
 
-  // Drive wildcards: del drive:public.exchange/*.log
-  if (/^drive:/i.test(target) && (target.includes("*") || target.includes("?"))) {
+  // Drive wildcards:
+  // - del drive:public.exchange/*.log
+  // - del public.exchange/*.log
+  const isGlob = target.includes("*") || target.includes("?");
+  const looksLikeDriveId = target.includes("/") && !target.includes(":");
+  if ((/^drive:/i.test(target) || looksLikeDriveId) && isGlob) {
     const pat = target.replace(/^drive:/i, "");
     const re = globToRegex(pat);
     const keys = Object.keys(state.drive || {});
@@ -2796,6 +2840,7 @@ function delCommand(args) {
     return;
   }
 
+  // Drive single file (accepts both `drive:loc/file` and `loc/file`).
   const drive = getDriveEntry(target);
   if (drive) {
     delete state.drive[drive.id];
@@ -2873,6 +2918,25 @@ function resolveUploadSource(source) {
   const s = String(source || "").trim();
   if (!s) return null;
 
+  // Convenience: allow `local/<name>.s` to refer to `drive:local/<handle>.<name>.s`.
+  if (/^local\//i.test(s) && state.handle) {
+    const rest = s.replace(/^local\//i, "").trim();
+    const handle = String(state.handle).trim();
+    if (rest) {
+      const file = rest.toLowerCase().startsWith(handle.toLowerCase() + ".") ? rest : `${handle}.${rest}`;
+      const resolved = getDriveEntry(`drive:local/${file}`);
+      if (resolved) {
+        return {
+          kind: "text",
+          name: resolved.name,
+          content: String(resolved.content || ""),
+          edited: false,
+          detail: driveRef(resolved.id),
+        };
+      }
+    }
+  }
+
   const drive = getDriveEntry(s);
   if (drive) {
     return {
@@ -2907,7 +2971,7 @@ function uploadCommand(args) {
   const a = args || [];
   const source = a[0];
   if (!source) {
-    writeLine("Usage: upload <drive:loc/file|script> [loc|file|loc:file] [file]", "warn");
+    writeLine("Usage: upload <drive:loc/file|script> [file]", "warn");
     return;
   }
 
@@ -2925,14 +2989,28 @@ function uploadCommand(args) {
     destFile = a[2];
   } else if (a.length === 2) {
     const target = String(a[1] || "").trim();
-    if (target.includes(":")) {
-      const parts = target.split(":", 2);
+    // Backwards compatibility: if user passes a loc-qualified destination, parse it,
+    // but uploads still only succeed when the destination loc is your current loc.
+    const normalizedTarget = target.replace(/^drive:/i, "");
+
+    if (normalizedTarget.includes(":")) {
+      const parts = normalizedTarget.split(":", 2);
       destLoc = parts[0] || destLoc;
       destFile = parts[1] || null;
-    } else if (getLoc(target)) {
-      destLoc = target;
+    } else if (normalizedTarget.includes("/")) {
+      const parts = normalizedTarget.split("/");
+      const maybeLoc = parts[0];
+      const rest = parts.slice(1).join("/");
+      if (maybeLoc && getLoc(maybeLoc) && rest) {
+        destLoc = maybeLoc;
+        destFile = rest;
+      } else {
+        destFile = normalizedTarget;
+      }
+    } else if (getLoc(normalizedTarget)) {
+      destLoc = normalizedTarget;
     } else {
-      destFile = target;
+      destFile = normalizedTarget;
     }
   }
 
@@ -2952,8 +3030,11 @@ function uploadCommand(args) {
     return;
   }
 
-  if (destLoc !== state.loc && state.loc !== "relay.uplink") {
-    writeLine("Remote upload requires `connect relay.uplink`.", "warn");
+  // Uploads only target your current connected loc.
+  // This keeps location scoping consistent: you can't change a remote system while disconnected from it.
+  if (destLoc !== state.loc) {
+    writeLine(`You must be connected to ${destLoc} to upload there.`, "warn");
+    writeLine(`Tip: connect ${destLoc}`, "dim");
     return;
   }
 
@@ -2974,6 +3055,8 @@ function uploadCommand(args) {
 
   writeLine(`uploaded ${src.detail} -> ${destLoc}/${destFile} (${hash})`, "ok");
   markDirty();
+  // If uploading into the current location, make it immediately visible in `ls` and readable via `cat`.
+  if (destLoc === state.loc) trackRecentFile(`${destLoc}/${destFile}`);
   storyChatTick();
 }
 
@@ -3158,6 +3241,22 @@ function readFile(name) {
   }
   const found = getLocFileEntry(state.loc, name);
   if (!found) {
+    // Uploaded overlay files in the current loc.
+    const bucket = state.uploads && state.uploads[state.loc] && state.uploads[state.loc].files;
+    if (bucket && typeof bucket === "object") {
+      const key = String(name || "").trim();
+      const exact = key && bucket[key] ? bucket[key] : null;
+      const lower = key.toLowerCase();
+      const ciName = !exact ? Object.keys(bucket).find((k) => k.toLowerCase() === lower) : null;
+      const up = exact || (ciName ? bucket[ciName] : null);
+      if (up) {
+        writeLine(`${ciName || key} [uploaded]`, "header");
+        writeBlock(String(up.content || ""), "dim");
+        trackRecentFile(`${state.loc}/${ciName || key}`);
+        return;
+      }
+    }
+
     const script = resolveScript(name);
     if (!script) {
       writeLine("File not found.", "error");
@@ -3180,6 +3279,20 @@ function readFile(name) {
     return;
   }
   const entry = found.entry;
+
+  // If an uploaded overlay exists for this file name, prefer it (it represents the current remote state).
+  const bucket = state.uploads && state.uploads[state.loc] && state.uploads[state.loc].files;
+  if (bucket && typeof bucket === "object") {
+    const key = String(found.name || "").trim();
+    const up = key && bucket[key] ? bucket[key] : null;
+    if (up) {
+      writeLine(`${key} [uploaded]`, "header");
+      writeBlock(String(up.content || ""), "dim");
+      trackRecentFile(`${state.loc}/${key}`);
+      return;
+    }
+  }
+
   writeBlock(entry.content, "dim");
   if (String(name || "").toLowerCase() === "primer.dat") state.flags.add("read_primer");
   if (entry.cipher) {
@@ -5049,8 +5162,8 @@ function handleCommand(inputText) {
         if (topic === "del" || topic === "delete" || topic === "rm") {
           writeLine("help del", "header");
           writeLine("Delete downloaded drive files or your local scripts.", "dim");
-          writeLine("Delete a drive file: `del drive:sable.gate/cipher.txt`", "dim");
-          writeLine("Drive wildcards: `del drive:public.exchange/*.log`", "dim");
+          writeLine("Delete a drive file: `del sable.gate/cipher.txt` (or `del drive:sable.gate/cipher.txt`)", "dim");
+          writeLine("Drive wildcards: `del public.exchange/*.log`", "dim");
           writeLine("Delete your script: `del <your_handle>.chk --confirm`", "dim");
           break;
         }
@@ -5058,7 +5171,7 @@ function handleCommand(inputText) {
         if (topic === "drive") {
           writeLine("help drive", "header");
           writeLine("Show your local drive tree: `drive`", "dim");
-          writeLine("Flat list (full refs): `drive ls`", "dim");
+          writeLine("Expanded drive tree + full refs: `drive ls`", "dim");
           writeLine("Read one: `cat drive:sable.gate/cipher.txt`", "dim");
           writeLine("Tip: cipher files set your decode buffer (like `cat` does).", "dim");
           writeLine("Note: your local scripts are mirrored into drive too (so size matters).", "dim");
@@ -5076,9 +5189,10 @@ function handleCommand(inputText) {
         if (topic === "upload" || topic === "uploads") {
           writeLine("help upload", "header");
           writeLine("Upload a local script or drive file back into a loc.", "dim");
+          writeLine("Uploads always target your current connected loc.", "dim");
           writeLine("Upload (current loc): `upload drive:sable.gate/cipher.txt note.txt`", "dim");
           writeLine("Upload a script: `upload <your_handle>.patch patch.s`", "dim");
-          writeLine("Remote upload: connect `relay.uplink` then `upload <src> some.loc:file`", "dim");
+          writeLine("Tip: connect to the loc you want to upload into, then run upload.", "dim");
           writeLine("View uploads: `uploads`", "dim");
           break;
         }
@@ -5758,7 +5872,7 @@ function completeInput({ direction = 1 } = {}) {
   } else if (cmd === "del") {
     candidates = uniqueSorted([...allDriveRefs(), ...allUserScriptRefs()]);
   } else if (cmd === "drive") {
-    candidates = ["ls"];
+    candidates = ["ls", "flat"];
   } else if (cmd === "decode") {
     candidates = ["rot13", "b64"];
   } else if (cmd === "install") {
