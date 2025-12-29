@@ -966,7 +966,7 @@ function renderTerminalRich(container, text) {
 function chatPost({ channel, from, body, kind }) {
   const resolvedFrom = from || state.handle || "ghost";
   const resolvedKind = kind || "user";
-  state.chat.log.push({
+  const entry = {
     t: Date.now(),
     channel: channel || state.chat.channel,
     from: resolvedFrom,
@@ -974,12 +974,24 @@ function chatPost({ channel, from, body, kind }) {
     kind: resolvedKind,
     color: resolvedKind === "system" ? null : userColorClass(resolvedFrom),
     uid: resolvedKind === "system" ? "----" : userId4(resolvedFrom),
-  });
+  };
+  state.chat.log.push(entry);
   renderChat();
+  return entry;
 }
 
 function chatSystem(body) {
-  chatPost({ from: "sys", body, kind: "system" });
+  return chatPost({ from: "sys", body, kind: "system" });
+}
+
+function chatSystemTransient(body, ttlMs = 1200) {
+  const entry = chatSystem(body);
+  if (!entry) return;
+  window.setTimeout(() => {
+    if (!state || !state.chat || !Array.isArray(state.chat.log)) return;
+    state.chat.log = state.chat.log.filter((m) => m && m.t !== entry.t);
+    renderChat();
+  }, Math.max(0, Number(ttlMs) || 0));
 }
 
 function chatJoin(channel) {
@@ -5552,7 +5564,7 @@ function boot() {
   const bootMs = runBootSequence({ hasSave });
 
   // Chat boot message (always), then restore indicator if applicable.
-  chatSystem("chat initializing...");
+  chatSystemTransient("chat initializing...", 900);
 
   window.setTimeout(() => {
     if (!loadState({ silent: true })) {
@@ -5565,7 +5577,7 @@ function boot() {
       writeLine("Auto-loaded save.", "ok");
       writeLine("Tip: type `restart --confirm` to start over.", "dim");
       tutorialAdvance();
-      chatSystem("restoring session...");
+      chatSystemTransient("restoring session...", 1200);
     }
     ensureDriveBackfill({ silent: true });
     ensureSiphonLoop();
