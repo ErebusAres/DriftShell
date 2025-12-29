@@ -58,6 +58,16 @@ body {
   letter-spacing: 0.02em;
 }
 
+body.booting #screen {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+body.booting .line {
+  text-align: center;
+}
+
 /* Make selections visible and copy-friendly */
 #screen ::selection,
 #chat-log ::selection,

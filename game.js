@@ -53,9 +53,16 @@ const UPGRADE_DEFS = {
   "upg.drive_ext": {
     name: "drive_ext",
     apply: () => {
-      state.driveMax = Math.max(state.driveMax || 0, 80_000);
+      state.driveMax = (Number(state.driveMax) || 0) + 40_000;
     },
     describe: "Expands drive capacity for downloaded text/cipher files.",
+  },
+  "upg.drive_array": {
+    name: "drive_array",
+    apply: () => {
+      state.driveMax = (Number(state.driveMax) || 0) + 120_000;
+    },
+    describe: "Large drive expansion for heavy ops.",
   },
   "upg.siphon": {
     name: "siphon",
@@ -107,6 +114,8 @@ let autosaveTimer = null;
 let autosaveInterval = null;
 let lastAutosaveAt = 0;
 let siphonInterval = null;
+let booting = false;
+let bootTimers = [];
 const AUTOSAVE_MIN_INTERVAL_MS = 15_000;
 const AUTOSAVE_FORCE_INTERVAL_MS = 60_000;
 const NON_DIRTY_COMMANDS = new Set([
@@ -189,6 +198,84 @@ function ensureAutosaveLoop() {
       saveState({ silent: true });
     } catch {}
   });
+}
+
+function setBooting(on) {
+  booting = !!on;
+  try {
+    document.body.classList.toggle("booting", booting);
+  } catch {}
+  if (input) input.disabled = booting;
+  if (chatInput) chatInput.disabled = booting;
+}
+
+function clearBootTimers() {
+  bootTimers.forEach((t) => {
+    try {
+      window.clearTimeout(t);
+    } catch {}
+  });
+  bootTimers = [];
+}
+
+function scheduleBootLine(text, kind, delayMs) {
+  const t = window.setTimeout(() => {
+    writeLine(text, kind);
+  }, delayMs);
+  bootTimers.push(t);
+}
+
+function runBootSequence({ hasSave }) {
+  setBooting(true);
+  clearBootTimers();
+  screen.innerHTML = "";
+
+  const logo = [
+    " ____  ____  __  ______  _______  ____  ____  __  ",
+    "|  _ \\\\|  _ \\\\|  ||  ____||__   __||  _ \\\\|  _ \\\\|  | ",
+    "| | | | |_) |  || |__      | |   | |_) | |_) |  | ",
+    "| |_| |  _ <|  ||  __|     | |   |  _ <|  _ <|  | ",
+    "|____/|_| \\\\_\\\\__||_|        |_|   |_| \\\\_\\\\_| \\\\_\\\\__| ",
+    "            DRIFTSHELL :: DRIFT LOCAL",
+  ];
+
+  const steps = [
+    { t: 0, kind: "dim", text: "BOOTSTRAP v0.9 :: drift-compatible" },
+    { t: 150, kind: "dim", text: "memchk ............ ok" },
+    { t: 280, kind: "dim", text: "ioctl  ............ ok" },
+    { t: 410, kind: "dim", text: "gpu   ............. ok" },
+    { t: 560, kind: "dim", text: "netlink DRIFT/LOCAL  ok" },
+    { t: 720, kind: "dim", text: "chatd ............. init" },
+    { t: 840, kind: "dim", text: hasSave ? "scratch ........... restore pending" : "scratch ........... ready" },
+    { t: 980, kind: "dim", text: "mount /shell ....... ok" },
+  ];
+
+  // Print logo slightly after initial checks.
+  const baseLogoAt = 1150;
+  logo.forEach((line, idx) => scheduleBootLine(line, "header", baseLogoAt + idx * 55));
+
+  steps.forEach((s) => scheduleBootLine(s.text, s.kind, s.t));
+
+  const doneAt = baseLogoAt + logo.length * 55 + 220;
+  const finish = () => {
+    clearBootTimers();
+    setBooting(false);
+    try {
+      input.focus();
+    } catch {}
+  };
+
+  const doneTimer = window.setTimeout(() => finish(), doneAt);
+  bootTimers.push(doneTimer);
+
+  // Allow skip with any key press.
+  const onSkip = (ev) => {
+    if (!booting) return;
+    if (ev && (ev.ctrlKey || ev.metaKey || ev.altKey)) return;
+    clearBootTimers();
+    finish();
+  };
+  document.addEventListener("keydown", onSkip, { once: true });
 }
 
 function siphonPayout(level) {
@@ -1990,6 +2077,12 @@ const STORE_ITEMS = [
     desc: "Drive expansion (store more downloaded text/ciphers).",
   },
   {
+    id: "upg.drive_array",
+    price: 380,
+    when: () => state.unlocked.has("archives.arc"),
+    desc: "Large drive expansion (for heavy ops).",
+  },
+  {
     id: "upg.modem",
     price: 160,
     when: () => state.flags.has("trace_open"),
@@ -2177,6 +2270,102 @@ function storeDriveCopy(locName, fileName, entry) {
     downloadedAt: Date.now(),
   };
   return { ok: true, id, existed: false, bytes };
+}
+
+let locFileIndexCache = null;
+function getLocFileIndex() {
+  if (locFileIndexCache) return locFileIndexCache;
+  const scripts = new Map(); // scriptName -> { loc, file, entry }
+  const items = new Map(); // itemId -> { loc, file, entry }
+  const upgrades = new Map(); // upgradeId -> { loc, file, entry }
+
+  Object.keys(LOCS).forEach((locName) => {
+    const loc = LOCS[locName];
+    const files = (loc && loc.files) || {};
+    Object.keys(files).forEach((fileName) => {
+      const entry = files[fileName];
+      if (!entry) return;
+      if (entry.type === "script" && entry.script && entry.script.name) {
+        const n = String(entry.script.name);
+        if (!scripts.has(n)) scripts.set(n, { loc: locName, file: fileName, entry });
+      }
+      if (entry.type === "item" && entry.item) {
+        const id = String(entry.item);
+        if (!items.has(id)) items.set(id, { loc: locName, file: fileName, entry });
+      }
+      if (entry.type === "upgrade" && entry.item) {
+        const id = String(entry.item);
+        if (!upgrades.has(id)) upgrades.set(id, { loc: locName, file: fileName, entry });
+      }
+    });
+  });
+
+  locFileIndexCache = { scripts, items, upgrades };
+  return locFileIndexCache;
+}
+
+function ensureDriveBackfill({ silent } = {}) {
+  if (!state.handle) return;
+  if (!state.drive || typeof state.drive !== "object") state.drive = {};
+
+  const { scripts, items, upgrades } = getLocFileIndex();
+  let added = 0;
+  let skippedFull = 0;
+
+  function tryStore(locName, fileName, entry) {
+    const res = storeDriveCopy(locName, fileName, entry);
+    if (res.ok) {
+      if (!res.existed) added += 1;
+      return true;
+    }
+    if (res.reason === "full") skippedFull += 1;
+    return false;
+  }
+
+  // Backfill downloaded kit scripts (historical saves may have kit but no drive entry).
+  Object.keys(state.kit || {}).forEach((scriptName) => {
+    const src = scripts.get(String(scriptName));
+    if (src) tryStore(src.loc, src.file, src.entry);
+    else {
+      const synthetic = {
+        type: "script",
+        script: { name: scriptName, sec: state.kit[scriptName].sec, code: state.kit[scriptName].code },
+        content: state.kit[scriptName].content || "",
+      };
+      tryStore("kit.cache", `${scriptName}.s`, synthetic);
+    }
+  });
+
+  // Backfill acquired items/upgrades that came from downloads.
+  Array.from(state.inventory || []).forEach((id) => {
+    const key = String(id);
+    const srcItem = items.get(key);
+    const srcUpg = upgrades.get(key);
+    if (srcItem) tryStore(srcItem.loc, srcItem.file, srcItem.entry);
+    if (srcUpg) tryStore(srcUpg.loc, srcUpg.file, srcUpg.entry);
+  });
+
+  // Mirror local user scripts into drive so their size matters.
+  Object.keys(state.userScripts || {}).forEach((name) => {
+    const s = state.userScripts[name];
+    const entry = {
+      type: "script",
+      script: { name: String(name), sec: String((s && s.sec) || "FULLSEC"), code: String((s && s.code) || "") },
+      content: "",
+    };
+    tryStore("local", `${state.handle}.${name}.s`, entry);
+  });
+
+  if (!silent && (added || skippedFull) && !state.flags.has("drive_backfill_v1")) {
+    state.flags.add("drive_backfill_v1");
+    if (added) writeLine(`sys::drive synced (+${added})`, "dim");
+    if (skippedFull) {
+      writeLine("sys::drive full (some files not mirrored)", "warn");
+      writeLine("Tip: `store` -> buy/install `upg.drive_ext`, or delete with `del drive:...`", "dim");
+    }
+  }
+
+  if (added) markDirty();
 }
 
 function delCommand(args) {
@@ -2390,11 +2579,10 @@ function scheduleDownload(locName, fileName) {
   const entry = loc && loc.files && loc.files[fileName];
   if (!entry || !isDownloadableEntry(entry)) return false;
 
-  // Skip duplicates already acquired.
-  if (entry.type === "item" && state.inventory.has(entry.item)) return false;
-  if (entry.type === "upgrade" && state.inventory.has(entry.item)) return false;
-  if (entry.type === "script" && state.kit[entry.script.name]) return false;
-  if (state.drive[driveId(locName, fileName)]) return false;
+  const id = driveId(locName, fileName);
+
+  // If the drive copy already exists, this download is redundant.
+  if (state.drive[id]) return false;
 
   const alreadyQueued =
     (state.downloads.active &&
@@ -4041,6 +4229,16 @@ function finishEditor(save) {
   const sec = match ? match[1].toUpperCase() : "FULLSEC";
   state.userScripts[editor.name] = { owner: state.handle, name: editor.name, sec, code };
   writeLine(`Saved ${state.handle}.${editor.name} [${sec}]`, "ok");
+  // Mirror local script into drive so size matters.
+  const mirrored = storeDriveCopy(
+    "local",
+    `${state.handle}.${editor.name}.s`,
+    { type: "script", script: { name: editor.name, sec, code } }
+  );
+  if (!mirrored.ok) {
+    writeLine("sys::drive full (script not mirrored)", "warn");
+    writeLine("Tip: buy/install `upg.drive_ext` or delete with `del drive:...`", "dim");
+  }
   setMark("mark.edit");
   markDirty();
 }
@@ -4173,6 +4371,7 @@ function loadState(options) {
   }
   // scratchpad is user-authored; don't clear on load
   if (!opts.silent) writeLine("State loaded.", "ok");
+  ensureDriveBackfill({ silent: true });
   applyCorruptionClasses();
   showLoc();
   storyChatTick();
@@ -4352,6 +4551,7 @@ function handleCommand(inputText) {
     updateHud();
     ensureAutosaveLoop();
     ensureSiphonLoop();
+    ensureDriveBackfill({ silent: true });
     markDirty();
     autoSaveNow();
     return;
@@ -4441,6 +4641,7 @@ function handleCommand(inputText) {
           writeLine("List downloaded files (scripts/items/text): `drive`", "dim");
           writeLine("Read one: `cat drive:sable.gate/cipher.txt`", "dim");
           writeLine("Tip: cipher files set your decode buffer (like `cat` does).", "dim");
+          writeLine("Note: your local scripts are mirrored into drive too (so size matters).", "dim");
           break;
         }
 
@@ -5156,22 +5357,33 @@ function completeInput() {
 }
 
 function boot() {
-  writeLine("driftshell // local drift sim", "header");
   hookUi();
-  renderChat();
   ensureAutosaveLoop();
-  if (!loadState({ silent: true })) {
-    writeLine("Enter a handle to begin.", "dim");
-    writeLine("Tip: type `help` for examples, or `tutorial` to reprint steps.", "dim");
-    loadScratchFromStorage();
-    tutorialAdvance();
-  } else {
-    writeLine("Auto-loaded save.", "ok");
-    writeLine("Tip: type `restart --confirm` to start over.", "dim");
-    tutorialAdvance();
-  }
-  ensureSiphonLoop();
-  updateHud();
+  renderChat();
+
+  const hasSave = !!(localStorage.getItem(SAVE_KEY) || localStorage.getItem(LEGACY_SAVE_KEY));
+  runBootSequence({ hasSave });
+
+  // Chat boot message (always), then restore indicator if applicable.
+  chatSystem("chat initializing...");
+
+  window.setTimeout(() => {
+    if (!loadState({ silent: true })) {
+      writeLine("Enter a handle to begin.", "dim");
+      writeLine("Tip: type `help` for examples, or `tutorial` to reprint steps.", "dim");
+      loadScratchFromStorage();
+      tutorialAdvance();
+      chatSystem("new session ready");
+    } else {
+      writeLine("Auto-loaded save.", "ok");
+      writeLine("Tip: type `restart --confirm` to start over.", "dim");
+      tutorialAdvance();
+      chatSystem("restoring session...");
+    }
+    ensureDriveBackfill({ silent: true });
+    ensureSiphonLoop();
+    updateHud();
+  }, hasSave ? 1850 : 1650);
 }
 
 boot();
