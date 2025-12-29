@@ -2442,6 +2442,19 @@ function driveRef(id) {
   return `drive:${id}`;
 }
 
+function formatBytesShort(bytes) {
+  const n = Math.max(0, Number(bytes) || 0);
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)}MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)}KB`;
+  return `${n}B`;
+}
+
+function driveTreeLine(prefix, name, suffix) {
+  const left = `${prefix}${name}`;
+  if (!suffix) return left;
+  return `${left}  ${suffix}`;
+}
+
 function getDriveEntry(ref) {
   const key = String(ref || "")
     .trim()
@@ -2457,7 +2470,7 @@ function getDriveEntry(ref) {
 }
 
 function listDriveFiles() {
-  writeLine("DRIVE FILES", "header");
+  writeLine("DRIVE // LIST", "header");
   const keys = Object.keys(state.drive || {}).sort();
   if (!keys.length) {
     writeLine("(empty)", "dim");
@@ -2465,40 +2478,96 @@ function listDriveFiles() {
     return;
   }
   writeLine(`capacity: ${driveBytesUsed()}/${state.driveMax} bytes`, "dim");
-  keys.slice(0, 40).forEach((k) => {
+  keys.slice(0, 60).forEach((k) => {
     const e = state.drive[k];
     const bytes = driveBytesForContent((e && e.content) || "");
     const type = e && e.type ? String(e.type) : "file";
-    writeLine(`${driveRef(k)}  (${type}, ${bytes} bytes)`, "dim");
+    writeLine(`${driveRef(k)}  (${type}, ${formatBytesShort(bytes)})`, "dim");
   });
-  if (keys.length > 40) writeLine("...", "dim");
+  if (keys.length > 60) writeLine("...", "dim");
 }
 
-function driveSummary() {
+function driveTree() {
   const keys = Object.keys(state.drive || {});
   const used = driveBytesUsed();
   const max = Number(state.driveMax) || 0;
   const pct = max > 0 ? Math.min(999, Math.floor((used / max) * 100)) : 0;
+
   writeLine("DRIVE", "header");
   writeLine(`usage: ${used}/${max} bytes (${pct}%)`, "dim");
-  writeLine(`files: ${keys.length}`, "dim");
-  writeLine("note: drive is stored in browser localStorage", "dim");
+  writeLine("drive:/", "dim");
+
   if (!keys.length) {
+    writeLine("|-- (empty)", "dim");
     writeLine("Tip: `download cipher.txt` then `cat drive:sable.gate/cipher.txt`", "dim");
     return;
   }
-  // Show top largest files (helps players decide what to delete).
-  const largest = keys
-    .map((k) => {
-      const e = state.drive[k];
-      const bytes = driveBytesForContent((e && e.content) || "");
-      return { k, bytes, type: (e && e.type) || "file" };
-    })
-    .sort((a, b) => b.bytes - a.bytes)
-    .slice(0, 8);
-  writeLine("largest:", "dim");
-  largest.forEach((x) => writeLine(`${driveRef(x.k)}  (${x.type}, ${x.bytes} bytes)`, "dim"));
-  writeLine("Tip: `drive ls` to list all, or `del drive:<loc>/<file>` to free space.", "dim");
+
+  const byLoc = new Map(); // loc -> { type -> [{file, bytes}] }
+  keys.forEach((id) => {
+    const parts = String(id).split("/");
+    const loc = parts[0] || "unknown";
+    const file = parts.slice(1).join("/") || "unknown";
+    const e = state.drive[id];
+    const type = e && e.type ? String(e.type) : "file";
+    const bytes = driveBytesForContent((e && e.content) || "");
+    if (!byLoc.has(loc)) byLoc.set(loc, new Map());
+    const typeMap = byLoc.get(loc);
+    if (!typeMap.has(type)) typeMap.set(type, []);
+    typeMap.get(type).push({ file, bytes, id });
+  });
+
+  const locs = Array.from(byLoc.keys()).sort((a, b) => a.localeCompare(b));
+  const typeOrder = ["script", "text", "item", "upgrade", "file"];
+
+  locs.forEach((loc, locIdx) => {
+    const lastLoc = locIdx === locs.length - 1;
+    const locPrefix = lastLoc ? "`-- " : "|-- ";
+    writeLine(driveTreeLine(locPrefix, `${loc}/`, ""), "dim");
+
+    const typeMap = byLoc.get(loc);
+    const types = Array.from(typeMap.keys()).sort((a, b) => {
+      const ia = typeOrder.indexOf(a);
+      const ib = typeOrder.indexOf(b);
+      if (ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+      return a.localeCompare(b);
+    });
+
+    types.forEach((t, typeIdx) => {
+      const lastType = typeIdx === types.length - 1;
+      const branch = lastLoc ? "    " : "|   ";
+      const typePrefix = branch + (lastType ? "`-- " : "|-- ");
+      const label =
+        t === "script"
+          ? "Scripts"
+          : t === "text"
+            ? "Text"
+            : t === "item"
+              ? "Items"
+              : t === "upgrade"
+                ? "Upgrades"
+                : "Files";
+
+      const list = typeMap.get(t).slice().sort((a, b) => a.file.localeCompare(b.file));
+      const count = list.length;
+      const totalBytes = list.reduce((acc, x) => acc + x.bytes, 0);
+      writeLine(driveTreeLine(typePrefix, `${label}/`, `(${count}, ${formatBytesShort(totalBytes)})`), "dim");
+
+      const fileBranch = branch + (lastType ? "    " : "|   ");
+      const show = list.slice(0, 14);
+      show.forEach((x, i) => {
+        const lastFile = i === show.length - 1 && count <= show.length;
+        const filePrefix = fileBranch + (lastFile ? "`-- " : "|-- ");
+        writeLine(driveTreeLine(filePrefix, x.file, `(${formatBytesShort(x.bytes)})`), "dim");
+      });
+      if (count > show.length) {
+        writeLine(fileBranch + "`-- " + `... (+${count - show.length} more)`, "dim");
+      }
+    });
+  });
+
+  writeLine("Tip: use `cat drive:<loc>/<file>` to read, and `del drive:<loc>/<file>` to delete.", "dim");
+  writeLine("Tip: `drive ls` for a flat list of full drive refs.", "dim");
 }
 
 function driveCommand(args) {
@@ -2509,7 +2578,7 @@ function driveCommand(args) {
     listDriveFiles();
     return;
   }
-  driveSummary();
+  driveTree();
 }
 
 function listHistory(args) {
@@ -4974,8 +5043,8 @@ function handleCommand(inputText) {
 
         if (topic === "drive") {
           writeLine("help drive", "header");
-          writeLine("Show drive usage (localStorage): `drive`", "dim");
-          writeLine("List drive files: `drive ls`", "dim");
+          writeLine("Show your local drive tree: `drive`", "dim");
+          writeLine("Flat list (full refs): `drive ls`", "dim");
           writeLine("Read one: `cat drive:sable.gate/cipher.txt`", "dim");
           writeLine("Tip: cipher files set your decode buffer (like `cat` does).", "dim");
           writeLine("Note: your local scripts are mirrored into drive too (so size matters).", "dim");
@@ -5675,7 +5744,7 @@ function completeInput({ direction = 1 } = {}) {
   } else if (cmd === "del") {
     candidates = uniqueSorted([...allDriveRefs(), ...allUserScriptRefs()]);
   } else if (cmd === "drive") {
-    candidates = ["ls", "list"];
+    candidates = ["ls"];
   } else if (cmd === "decode") {
     candidates = ["rot13", "b64"];
   } else if (cmd === "install") {
