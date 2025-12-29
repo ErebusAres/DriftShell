@@ -2106,6 +2106,10 @@ function driveBytesUsed() {
   return total;
 }
 
+function driveBytesForContent(content) {
+  return new TextEncoder().encode(String(content || "")).length;
+}
+
 function driveId(locName, fileName) {
   return `${locName}/${fileName}`;
 }
@@ -2139,10 +2143,40 @@ function listDrive() {
   writeLine(`capacity: ${driveBytesUsed()}/${state.driveMax} bytes`, "dim");
   keys.slice(0, 40).forEach((k) => {
     const e = state.drive[k];
-    const bytes = new TextEncoder().encode(String((e && e.content) || "")).length;
-    writeLine(`${driveRef(k)}  (${bytes} bytes)`, "dim");
+    const bytes = driveBytesForContent((e && e.content) || "");
+    const type = e && e.type ? String(e.type) : "file";
+    writeLine(`${driveRef(k)}  (${type}, ${bytes} bytes)`, "dim");
   });
   if (keys.length > 40) writeLine("...", "dim");
+}
+
+function driveHas(id) {
+  return !!(state.drive && state.drive[id]);
+}
+
+function storeDriveCopy(locName, fileName, entry) {
+  const id = driveId(locName, fileName);
+  if (driveHas(id)) return { ok: true, id, existed: true };
+
+  let content = "";
+  let type = entry && entry.type ? entry.type : "text";
+  if (type === "script") content = String((entry.script && entry.script.code) || entry.content || "");
+  else content = String(entry.content || "");
+
+  const bytes = driveBytesForContent(content);
+  if (driveBytesUsed() + bytes > state.driveMax) {
+    return { ok: false, reason: "full", bytes };
+  }
+
+  state.drive[id] = {
+    loc: locName,
+    name: fileName,
+    type,
+    content,
+    cipher: !!entry.cipher,
+    downloadedAt: Date.now(),
+  };
+  return { ok: true, id, existed: false, bytes };
 }
 
 function delCommand(args) {
@@ -2360,7 +2394,7 @@ function scheduleDownload(locName, fileName) {
   if (entry.type === "item" && state.inventory.has(entry.item)) return false;
   if (entry.type === "upgrade" && state.inventory.has(entry.item)) return false;
   if (entry.type === "script" && state.kit[entry.script.name]) return false;
-  if (entry.type === "text" && state.drive[driveId(locName, fileName)]) return false;
+  if (state.drive[driveId(locName, fileName)]) return false;
 
   const alreadyQueued =
     (state.downloads.active &&
@@ -2424,6 +2458,15 @@ function completeActiveDownload() {
     return;
   }
 
+  // Store a local drive copy for everything downloadable.
+  const stored = storeDriveCopy(active.loc, active.file, entry);
+  if (!stored.ok) {
+    writeLine("download failed: drive full", "error");
+    writeLine("Tip: buy `upg.drive_ext` at the exchange (store), or delete with `del drive:...`.", "dim");
+    startNextDownloadIfIdle();
+    return;
+  }
+
   // Apply acquisition
   if (entry.type === "item") {
     state.inventory.add(entry.item);
@@ -2442,22 +2485,7 @@ function completeActiveDownload() {
     writeLine(`download complete: ${active.file} -> kit.${entry.script.name}`, "ok");
     state.marks.add("mark.download");
   } else if (entry.type === "text") {
-    const bytes = new TextEncoder().encode(String(entry.content || "")).length;
-    if (driveBytesUsed() + bytes > state.driveMax) {
-      writeLine("download failed: drive full", "error");
-      writeLine("Tip: buy `upg.drive_ext` at the exchange (store), or delete saves / restart.", "dim");
-      startNextDownloadIfIdle();
-      return;
-    }
-    const id = driveId(active.loc, active.file);
-    state.drive[id] = {
-      loc: active.loc,
-      name: active.file,
-      content: String(entry.content || ""),
-      cipher: !!entry.cipher,
-      downloadedAt: Date.now(),
-    };
-    writeLine(`download complete: ${active.file} -> ${driveRef(id)}`, "ok");
+    writeLine(`download complete: ${active.file} -> ${driveRef(driveId(active.loc, active.file))}`, "ok");
   }
   markDirty();
 
@@ -4371,7 +4399,8 @@ function handleCommand(inputText) {
           writeLine("Single file: `download tracer.s`", "dim");
           writeLine("Wildcard: `download *.s` (only works for `download`)", "dim");
           writeLine("Queue status: `downloads`", "dim");
-          writeLine("Text files download to drive: `drive` then `cat drive:loc/file`", "dim");
+          writeLine("All downloads are stored on your drive: `drive` then `cat drive:loc/file`", "dim");
+          writeLine("Scripts still install to kit; items/upgrades still go to inventory.", "dim");
           if (wantsArgs) {
             writeLine("Wildcard rules:", "header");
             writeLine("`*` matches any run of characters; `?` matches one character.", "dim");
@@ -4409,7 +4438,7 @@ function handleCommand(inputText) {
 
         if (topic === "drive") {
           writeLine("help drive", "header");
-          writeLine("List downloaded text/cipher files: `drive`", "dim");
+          writeLine("List downloaded files (scripts/items/text): `drive`", "dim");
           writeLine("Read one: `cat drive:sable.gate/cipher.txt`", "dim");
           writeLine("Tip: cipher files set your decode buffer (like `cat` does).", "dim");
           break;
