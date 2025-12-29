@@ -46,12 +46,12 @@ const UPGRADE_DEFS = {
   "upg.modem": {
     name: "modem",
     apply: () => {},
-    describe: "Improves download speed (~40% faster).",
+    describe: "Improves download speed (~30% faster).",
   },
   "upg.backbone": {
     name: "backbone",
     apply: () => {},
-    describe: "Major download speed upgrade (~55% faster).",
+    describe: "Major download speed upgrade (~50% faster).",
   },
   "upg.drive_ext": {
     name: "drive_ext",
@@ -2314,7 +2314,7 @@ const STORE_ITEMS = [
   },
   {
     id: "upg.modem",
-    price: 160,
+    price: 140,
     when: () => state.flags.has("trace_open"),
     desc: "Faster downloads (reliable).",
   },
@@ -3092,12 +3092,18 @@ function startNextDownloadIfIdle() {
   const loc = getLoc(next.loc);
   const entry = loc.files[next.file];
   const size = entrySize(entry);
-  const base = 520;
-  const scaled = Math.floor(size / 22);
-  const jitter = Math.floor(Math.random() * 140);
-  let durationMs = Math.max(520, Math.min(4200, base + scaled + jitter));
-  if (state.upgrades.has("upg.modem")) durationMs = Math.floor(durationMs * 0.6);
-  if (state.upgrades.has("upg.backbone")) durationMs = Math.floor(durationMs * 0.45);
+
+  // Downloads should be noticeable by default; upgrades should feel meaningful.
+  // Keep times game-y but not annoying.
+  const base = 1500;
+  const scaled = Math.floor(size / 3);
+  const jitter = Math.floor(Math.random() * 420);
+  let durationMs = Math.max(1400, Math.min(12_000, base + scaled + jitter));
+
+  let mult = 1.0;
+  if (state.upgrades.has("upg.modem")) mult *= 0.7;
+  if (state.upgrades.has("upg.backbone")) mult *= 0.5;
+  durationMs = Math.max(650, Math.floor(durationMs * mult));
 
   state.downloads.active = {
     loc: next.loc,
@@ -5133,6 +5139,7 @@ function handleCommand(inputText) {
           writeLine("Queue status: `downloads`", "dim");
           writeLine("All downloads are stored on your drive: `drive` then `cat drive:loc/file`", "dim");
           writeLine("Scripts still install to kit; items/upgrades still go to inventory.", "dim");
+          writeLine("Tip: upgrades like `upg.modem` and `upg.backbone` make downloads faster.", "dim");
           if (wantsArgs) {
             writeLine("Wildcard rules:", "header");
             writeLine("`*` matches any run of characters; `?` matches one character.", "dim");
