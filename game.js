@@ -90,17 +90,18 @@ const GLITCH_FRAGMENTS = {
 };
 // Region definitions attach existing locs to narrative zones.
 // To classify a new or existing host, add its loc id to exactly one `nodes` list below.
+// You can extend this list (e.g., add a DLC region) without touching core mechanics.
 const REGION_DEFS = [
   {
-    id: "intro_mesh",
-    name: "Isolated Mesh",
+    id: "introNet",
+    name: "Intro Network",
     nodes: ["home.hub", "training.node", "island.grid", "island.echo", "trust.anchor"],
     unlock: { requires: [], flags: [], nodes: [] },
     entry: ["Switchboard reroutes your signal through the safer mesh and reminds you who is watching."],
   },
   {
-    id: "open_mesh",
-    name: "Exchange Span",
+    id: "publicNet",
+    name: "Public Net",
     nodes: [
       "public.exchange",
       "weaver.den",
@@ -112,7 +113,7 @@ const REGION_DEFS = [
       "mirror.gate",
     ],
     unlock: {
-      requires: ["intro_mesh"],
+      requires: ["introNet"],
       flags: ["tutorial_training_done"],
       nodes: ["training.node"],
     },
@@ -122,21 +123,11 @@ const REGION_DEFS = [
     ],
   },
   {
-    id: "core_spine",
-    name: "Core Spine",
-    nodes: [
-      "archives.arc",
-      "lattice.cache",
-      "corp.audit",
-      "core.relic",
-      "rogue.core",
-      "glitch.cache",
-      "slipper.hole",
-      "victory.hall",
-      "echo.after",
-    ],
+    id: "corporateNet",
+    name: "Corporate Net",
+    nodes: ["archives.arc", "lattice.cache", "corp.audit", "glitch.cache", "slipper.hole", "victory.hall", "echo.after"],
     unlock: {
-      requires: ["open_mesh"],
+      requires: ["publicNet"],
       flagsAny: ["sniffer_run", "lattice_sigil", "glitch_chant_known"],
       nodes: ["weaver.den", "lattice.cache"],
     },
@@ -146,11 +137,18 @@ const REGION_DEFS = [
     ],
   },
   {
-    id: "cinder_depth",
+    id: "secureCore",
+    name: "Secure Core",
+    nodes: ["core.relic", "rogue.core"],
+    unlock: { requires: ["corporateNet"], flags: ["touched_relic", "glitch_phrase_ready"], nodes: ["core.relic"] },
+    entry: ["A rogue process echoes here. It listens for chants and trust."],
+  },
+  {
+    id: "cinderDepth",
     name: "Cinder Depth",
     nodes: ["deep.slate", "trench.node", "cinder.core"],
     unlock: {
-      requires: ["core_spine"],
+      requires: ["corporateNet"],
       flagsAny: ["glitch_phrase_ready", "mantle_phrase", "chat_cinder_ready"],
       nodes: ["trench.node"],
     },
@@ -2840,6 +2838,7 @@ const state = {
   },
   trust: { level: 2, heat: 0, lastScanAt: 0 },
   region: { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() },
+  currentRegion: null,
 };
 
 // RegionManager tracks named network zones (regions), which nodes they contain,
@@ -2989,6 +2988,7 @@ RegionManager = (() => {
       if (!unlockRegion(regionId, { silent: false })) return;
     }
     state.region.current = regionId;
+    state.currentRegion = regionId;
     emitRegionEntry(regionId);
   }
 
@@ -3022,7 +3022,8 @@ RegionManager = (() => {
 
 // Stub hook for future puzzle injections when a region is first entered.
 function onRegionEnter(region) {
-  // Example: drop a region-specific lock modifier or spawn timed events.
+  // Example extension:
+  // if (region.id === "corporateNet") chatPost({ channel: "#kernel", from: "sys", body: "Audit eyes open." });
   // Keep side effects minimal to avoid altering base mechanics.
   return region;
 }
@@ -4289,6 +4290,9 @@ function discover(locs) {
     }
   });
   RegionManager.bootstrap({ silent: true });
+  if (state.region && state.region.current && !state.currentRegion) {
+    state.currentRegion = state.region.current;
+  }
   return newly;
 }
 
@@ -6887,6 +6891,7 @@ function startBreach(locName) {
     return;
   }
   RegionManager.bootstrap({ silent: true });
+  state.currentRegion = state.region.current;
   const regionGate = RegionManager.canAccessNode(locName);
   if (!regionGate.ok) {
     writeLine(`Region sealed: ${regionGate.name} (${regionGate.hint || "route cooling"})`, "warn");
@@ -7033,6 +7038,7 @@ function connectLoc(locName) {
     return;
   }
   RegionManager.bootstrap({ silent: true });
+  state.currentRegion = state.region.current;
   const regionGate = RegionManager.canAccessNode(locName);
   if (!regionGate.ok) {
     writeLine(`Region sealed: ${regionGate.name} (${regionGate.hint || "route cooling"})`, "warn");
@@ -7287,6 +7293,7 @@ function getSaveData() {
       visited: Array.from((state.region && state.region.visited) || []),
       pending: Array.from((state.region && state.region.pending) || []),
     },
+    currentRegion: state.currentRegion || (state.region && state.region.current) || null,
   };
 }
 
@@ -7398,6 +7405,7 @@ function loadState(options) {
           pending: new Set(data.region.pending || []),
         }
       : state.region || { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() };
+  state.currentRegion = data.currentRegion || (state.region && state.region.current) || null;
   if (data.chat) {
     state.chat.channel = data.chat.channel || "#kernel";
     state.chat.channels = new Set(data.chat.channels || ["#kernel"]);
