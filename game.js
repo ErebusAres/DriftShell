@@ -341,6 +341,7 @@ function trustAdjustHeat(delta, reason) {
         body: `trust drop (${reason || "heat"}). level ${state.trust.level}/${TRUST_MAX_LEVEL}`,
         kind: "system",
       });
+      watcherTrustMemory();
     } else {
       state.lockoutUntil = Date.now() + 6000;
       chatPost({
@@ -363,6 +364,7 @@ function trustCoolDown(amount, reason) {
   if (reason === "wait" || reason === "anchor read") {
     recordBehavior("patient");
     recordRogueBehavior("careful");
+    watcherProfileTick();
   }
   markDirty();
   updateHud();
@@ -2928,6 +2930,7 @@ const state = {
   },
   rogueProfile: { noise: 0, careful: 0, brute: 0, failures: 0, outcomes: new Set() },
   behaviorProfile: { noise: 0, careful: 0, aggressive: 0, patient: 0 },
+  watcherProfile: null,
 };
 
 // RegionManager tracks named network zones (regions), which nodes they contain,
@@ -5685,6 +5688,7 @@ function waitTick() {
     trustCoolDown(TRUST_COOLDOWN_ON_WAIT, "wait");
     recordBehavior("patient");
     recordRogueBehavior("careful");
+    watcherProfileTick();
     storyChatTick();
     markDirty();
     return;
@@ -6375,6 +6379,24 @@ function behaviorToneNudge() {
   if (dom === "patient") chatPost({ channel: "#kernel", from: "watcher", body: "stillness is a kind of noise too. the net adjusts." });
 }
 
+// Narrative tie-in when trace rises: remind that watchers move because of patterns.
+function watcherTraceReact(reason) {
+  const dom = dominantBehavior();
+  const note =
+    dom === "noise"
+      ? "same wake again; watchers move."
+      : dom === "aggressive"
+        ? "force echoes. watchers route toward you."
+        : dom === "patient"
+          ? "silence broke; eyes pivot."
+          : "cadence noted; trace routes tighten.";
+  chatPost({
+    channel: "#kernel",
+    from: "watcher",
+    body: reason ? `${note} (${reason})` : note,
+  });
+}
+
 function decodeCipher(type, payload) {
   const data = payload || state.lastCipher;
   if (!data) {
@@ -6458,6 +6480,26 @@ function dominantBehavior() {
   ];
   entries.sort((a, b) => b[1] - a[1]);
   return entries[0][1] > 0 ? entries[0][0] : null;
+}
+
+// Quiet watcher profiling based on dominant behavior; stored but never shown.
+function watcherProfileTick() {
+  const dom = dominantBehavior();
+  if (!dom) return;
+  const key = `watcher_profile_${dom}`;
+  if (state.watcherProfile === dom) return;
+  state.watcherProfile = dom;
+  // Only whisper once per profile shift to keep it sparse.
+  if (!state.flags.has(key)) {
+    state.flags.add(key);
+    const lines = {
+      noise: "your cadence is familiar. watchers lean in.",
+      careful: "still hands; the net pauses, listening longer.",
+      aggressive: "marks linger where you force doors. archivists take note.",
+      patient: "long silences thread your path. some eyes stop asking if you belong.",
+    };
+    if (lines[dom]) chatPost({ channel: "#kernel", from: "watcher", body: lines[dom] });
+  }
 }
 
 function ensureStoryState() {
@@ -6615,6 +6657,7 @@ function validateGlitchChant() {
       writeLine(applyEscalationTextEffects("chant scatters in the buffer"), "warn");
       trustAdjustHeat(1, "chant_miss");
       if (near) state.trace = Math.min(state.traceMax, (state.trace || 0) + 1);
+      if (near) watcherTraceReact("chant noise");
       recordRogueBehavior("brute");
     }
     state.flags.delete("glitch_phrase_ready");
@@ -7364,6 +7407,7 @@ function failBreach() {
   recordRogueBehavior("fail");
   recordRogueBehavior("brute");
   recordBehavior("aggressive");
+  watcherTraceReact("lock fail");
   if (state.trace >= state.traceMax) {
     writeLine("TRACE LIMIT HIT. CONNECTION DROPPED.", "error");
 
