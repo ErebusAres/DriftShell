@@ -317,6 +317,8 @@ function trustAdjustHeat(delta, reason) {
   const next = Math.max(0, trustHeat() + delta);
   state.trust.heat = next;
   maybeTeachSecurityMoment(delta);
+  // Behavioral profiling: if the player keeps spiking heat, quietly shift watcher tone.
+  if (delta > 0) behaviorHeatTone(reason);
   if (next > 0) state.storyState?.flags?.add("heat_seen");
   // Heat implies noise; track for adaptation.
   if (delta > 0) recordRogueBehavior("noise");
@@ -6382,19 +6384,74 @@ function behaviorToneNudge() {
 // Narrative tie-in when trace rises: remind that watchers move because of patterns.
 function watcherTraceReact(reason) {
   const dom = dominantBehavior();
+  const bias = behaviorBias();
+  // Profiling: watcher tone softens or sharpens based on cadence + recent pressure.
   const note =
     dom === "noise"
       ? "same wake again; watchers move."
       : dom === "aggressive"
-        ? "force echoes. watchers route toward you."
+        ? bias.momentum > 1 ? "force repeats; watchers cut paths shorter." : "force echoes. watchers route toward you."
         : dom === "patient"
-          ? "silence broke; eyes pivot."
-          : "cadence noted; trace routes tighten.";
+          ? bias.tranquil && trustHeat() < 3 ? "silence broke; eyes pivot, but they linger." : "silence broke; eyes pivot."
+          : bias.tranquil && (state.trace || 0) === 0
+            ? "cadence noted; routes stay loose for a beat."
+            : "cadence noted; trace routes tighten.";
   chatPost({
     channel: "#kernel",
     from: "watcher",
     body: reason ? `${note} (${reason})` : note,
   });
+}
+
+// Lightweight snapshot of behavior for subtle profiling (invisible to players).
+function behaviorBias() {
+  const bp = state.behaviorProfile || {};
+  const rush = (bp.noise || 0) + (bp.aggressive || 0);
+  const calm = (bp.patient || 0) + (bp.careful || 0);
+  return {
+    rush,
+    calm,
+    momentum: rush - calm,
+    tranquil: calm > rush,
+    dom: dominantBehavior(),
+  };
+}
+
+// Profiling: when heat rises repeatedly, watchers change their phrasing to match cadence.
+function behaviorHeatTone(reason) {
+  const bias = behaviorBias();
+  const dom = bias.dom;
+  const heat = trustHeat();
+  // Avoid spam: only nudge after a few spikes and once per leaning.
+  if (heat < 2) return;
+  const key = `behavior_heat_tone_${dom || "neutral"}`;
+  if (state.flags.has(key)) return;
+  if (dom === "noise" || dom === "aggressive") {
+    if (heat >= Math.floor(TRUST_HEAT_THRESHOLD / 2)) {
+      state.flags.add(key);
+      chatPost({ channel: "#kernel", from: "watcher", body: "heat shapes your wake. some routes start locking early." });
+    }
+  } else if (dom === "patient" || dom === "careful") {
+    state.flags.add(key);
+    chatPost({ channel: "#kernel", from: "watcher", body: "pace noted. some systems give you a longer look before shutting." });
+  }
+}
+
+// Profiling: adjust trace rise subtly based on cadence. No new meters; just pacing.
+function profiledTraceRise(base, reason) {
+  const bias = behaviorBias();
+  const heat = trustHeat();
+  const currentTrace = state.trace || 0;
+  let delta = Math.max(0, base);
+  if (bias.momentum > 1 || bias.dom === "aggressive") {
+    if (heat >= Math.floor(TRUST_HEAT_THRESHOLD / 2) || currentTrace >= state.traceMax - 1) {
+      delta += 1; // Noisy players trigger earlier watcher pressure.
+    }
+  } else if ((bias.tranquil || bias.dom === "careful") && currentTrace === 0 && heat < TRUST_HEAT_THRESHOLD / 2) {
+    delta = Math.max(0, delta - 1); // Patient runs get a first-mistake grace.
+  }
+  state.trace = Math.min(state.traceMax, currentTrace + delta);
+  return delta;
 }
 
 function decodeCipher(type, payload) {
@@ -7312,6 +7369,12 @@ function startBreach(locName) {
       return;
     }
     rogueCoreAdaptiveIntro();
+    chatPost({
+      channel: "#kernel",
+      from: "archivist",
+      body: "Rogue ritual: trust steady, chant whole, checksum ready. Do not rush the lock stack.",
+    });
+    rogueCoreProfiledPressure();
   }
   RegionManager.bootstrap({ silent: true });
   state.currentRegion = state.region.current;
@@ -7324,40 +7387,6 @@ function startBreach(locName) {
       body: `Route sealed: ${regionGate.name}. Clear prior signals before it will answer.`,
     });
     return;
-  }
-  if (locName === "rogue.core") {
-    if (!state.flags.has("glitch_phrase_ready")) {
-      writeLine("rogue.core ignores you; chant incomplete.", "warn");
-      return;
-    }
-    if (!trustGate(3)) {
-      writeLine("rogue.core watches your trust level and discards your ping.", "warn");
-      return;
-    }
-    if (!state.flags.has("rogue_seed_read")) {
-      writeLine("rogue.core pulses back a checksum request. Read rogue.seed first.", "warn");
-      return;
-    }
-    rogueCoreAdaptiveIntro();
-  }
-  if (locName === "rogue.core") {
-    if (!state.flags.has("glitch_phrase_ready")) {
-      writeLine("rogue.core ignores you; chant incomplete.", "warn");
-      return;
-    }
-    if (!trustGate(3)) {
-      writeLine("rogue.core watches your trust level and discards your ping.", "warn");
-      return;
-    }
-    if (!state.flags.has("rogue_seed_read")) {
-      writeLine("rogue.core pulses back a checksum request. Read rogue.seed first.", "warn");
-      return;
-    }
-    chatPost({
-      channel: "#kernel",
-      from: "archivist",
-      body: "Rogue ritual: trust steady, chant whole, checksum ready. Do not rush the lock stack.",
-    });
   }
   if (!state.discovered.has(locName)) {
     writeLine("Loc not discovered.", "warn");
@@ -7391,18 +7420,22 @@ function startBreach(locName) {
   // Boss-like pressure: the warden pulses trace while you're inside the core lock stack.
   if (locName === "core.relic") {
     setCorruptionLevel(Math.max(corruptionLevel(), 2));
+    const bias = behaviorBias();
+    const basePulseMs = 7000;
+    // Profiling: noisier cadences feel more pressure; patient runs get a longer beat.
+    const pulseMs = Math.max(5200, basePulseMs + (bias.momentum > 1 ? -1200 : bias.tranquil ? 900 : 0));
     state.breach.pressure = window.setInterval(() => {
       if (!state.breach || state.breach.loc !== "core.relic") return;
       writeLine("WARDEN PULSE :: trace rising", "warn");
       failBreach();
-    }, 7000);
+    }, pulseMs);
   }
 
   writeLine(loc.locks[0].prompt, "warn");
 }
 
 function failBreach() {
-  state.trace += 1;
+  const traceDelta = profiledTraceRise(1, "lock fail");
   trustAdjustHeat(1, "failed lock");
   recordRogueBehavior("fail");
   recordRogueBehavior("brute");
@@ -7446,7 +7479,9 @@ function failBreach() {
     markDirty();
     return;
   }
-  writeLine(`TRACE +1 (${state.trace}/${state.traceMax})`, "warn");
+  const traceMsg =
+    traceDelta > 0 ? `TRACE +${traceDelta} (${state.trace}/${state.traceMax})` : `TRACE steady (${state.trace}/${state.traceMax})`;
+  writeLine(traceMsg, traceDelta > 0 ? "warn" : "dim");
 }
 
 function unlockAttempt(answer) {
@@ -9299,4 +9334,18 @@ function rogueCoreAdaptiveIntro() {
       : "Rogue listens. Trust steady, chant whole, checksum ready. Do not rush.",
   });
   if (brute) chatPost({ channel: "#kernel", from: "rogue", body: "...pattern detected. adjusting..." });
+}
+
+// Profiling: rogue core leans into the player's observed cadence without new meters.
+function rogueCoreProfiledPressure() {
+  const rp = state.rogueProfile || { noise: 0, careful: 0, brute: 0 };
+  const noiseTilt = (rp.noise || 0) + (rp.brute || 0);
+  const calmTilt = rp.careful || 0;
+  if (noiseTilt > calmTilt + 1 && state.trace < state.traceMax) {
+    state.trace = Math.min(state.traceMax, (state.trace || 0) + 1);
+    chatPost({ channel: "#kernel", from: "rogue", body: "trace warmed; your echo is predictable." });
+  } else if (calmTilt >= noiseTilt && state.trace > 0) {
+    state.trace = Math.max(0, (state.trace || 0) - 1);
+    chatPost({ channel: "#kernel", from: "rogue", body: "waiting alters the pattern. pressure eases... slightly." });
+  }
 }
