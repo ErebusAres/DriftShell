@@ -1876,6 +1876,32 @@ function npcReply(npcId, body) {
       });
       return;
     }
+    if (msg.includes("scripts")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "juniper",
+        body: "Scripts are just habits you can repeat. `edit <name>` to write one, `call <you>.<name>` to run it.",
+      });
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "juniper",
+        body: "If you're new: `edit chk` and build it slow. If you're not: `edit chk --example`.",
+      });
+      return;
+    }
+    if (msg.includes("trace")) {
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "juniper",
+        body: "TRACE climbs when you fail locks or push too hard. Let it cool, or `wait` between runs.",
+      });
+      chatPost({
+        channel: dmChannel(npcId),
+        from: "juniper",
+        body: "Upgrades help: `upg.trace_spool` raises the limit; `upg.coolant` reduces current TRACE.",
+      });
+      return;
+    }
     chatPost({
       channel: dmChannel(npcId),
       from: "juniper",
