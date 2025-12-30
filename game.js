@@ -4377,138 +4377,6 @@ const LOCS = {
       },
     },
   },
-  "glitch.cache": {
-    title: "GLITCH.CACHE",
-    desc: [
-      "A cache of corrupted text frames stitched together by the Weavers.",
-      "Every file has holes. Your job is to repair the chant.",
-    ],
-    requirements: { flags: ["slipper_signal"], items: ["weaver.mark"], trust: 2 },
-    locks: [
-      {
-        prompt: "LOCK: present weaver.mark",
-        answer: "weaver.mark",
-        hint: "Download weaver.mark from weaver.den.",
-      },
-    ],
-    links: ["slipper.hole", "core.relic"],
-    files: {
-      "glitch.map": {
-        type: "text",
-        content: [
-          "GLITCH MAP",
-          "Fragments to gather:",
-          "- fragment.alpha (island.echo)",
-          "- fragment.beta   (cache)",
-          "- fragment.gamma  (cache)",
-          "- fragment.delta  (cache)",
-          "",
-          "Each fragment hides a word. Replace missing glyphs (█) with the obvious letter after decoding.",
-          "The final chant opens the rogue core.",
-        ].join("\n"),
-      },
-      "fragment.beta": {
-        type: "text",
-        cipher: true,
-        content: `ZVE${GLITCH_GLYPH}BE`,
-      },
-      "fragment.gamma": {
-        type: "text",
-        cipher: true,
-        content: `RZO${GLITCH_GLYPH}E`,
-      },
-      "fragment.delta": {
-        type: "text",
-        cipher: true,
-        content: `FGV${GLITCH_GLYPH}Y`,
-      },
-      "chant.txt": {
-        type: "text",
-        content: [
-          "GLITCH CHANT (BROKEN)",
-          "??? THE EMBER STILL THREAD",
-          "",
-          "Fill the missing word by repairing the fragments.",
-        ].join("\n"),
-      },
-      "stitch.s": {
-        type: "script",
-        script: {
-          name: "stitch",
-          sec: "MIDSEC",
-          code: [
-            "// @sec MIDSEC",
-            "const frags = ['fragment.alpha','fragment.beta','fragment.gamma','fragment.delta'];",
-            "const words = frags.map((f) => (ctx.read(f) || '').toUpperCase());",
-            "const repaired = words.map((w) => w.replace(/█/g, '?').replace(/\\s+/g, '').replace(/[^A-Z?]/g,''));",
-            "const chant = `${repaired[1] || '???'} THE ${repaired[2] || 'EMBER'} ${repaired[3] || 'STILL'} THREAD`;",
-            "ctx.print('Fragments: ' + repaired.join(' / '));",
-            "ctx.print('Chant: ' + chant.trim());",
-            "if (!chant.includes('?')) {",
-            "  ctx.flag('glitch_phrase_ready');",
-            "  ctx.print('Chant locked. Rogue core will listen.');",
-            "} else {",
-            "  ctx.print('Fill missing glyphs in your fragment files to finalize the chant.', 'warn');",
-            "}",
-          ].join("\n"),
-        },
-        content: [
-          "/* stitch.s */",
-          "function main(ctx,args){",
-          "  // Read fragment.* files from your drive and reconstruct the chant.",
-          "}",
-        ].join("\n"),
-      },
-    },
-  },
-  "rogue.core": {
-    title: "ROGUE.CORE",
-    desc: [
-      "A rogue AI kernel adapted from the relic. It mirrors your handle back at you.",
-      "Locks adapt to your trust level and your ability to repair glitches.",
-    ],
-    requirements: { flags: ["touched_relic", "glitch_phrase_ready", "forked"], items: ["relay.shard", "relic.key"], trust: 3 },
-    locks: [
-      {
-        prompt: "ROGUE: checksum(payload|HANDLE=<you>) (hex3)",
-        answer: () => expectedForChecksumPayload(ROGUE_PAYLOAD),
-        hint: "Read rogue.seed. Compute checksum like the primer.",
-      },
-      {
-        prompt: "ROGUE: repaired chant",
-        answer: "MIRROR THE EMBER STILL THREAD",
-        hint: "Collect and repair fragments in glitch.cache.",
-      },
-      {
-        prompt: "ROGUE: confirm trust tier (LEVEL3)",
-        answer: "LEVEL3",
-        hint: "Keep trust steady. Wait or anchor if heat spikes.",
-      },
-    ],
-    links: ["core.relic"],
-    files: {
-      "rogue.seed": {
-        type: "text",
-        content: [
-          "ROGUE SEED",
-          "payload=" + ROGUE_PAYLOAD,
-          "Expected: checksum(payload|HANDLE=<you>) -> hex3",
-          "The rogue mirrors you. Keep trust at level 3+ or it ignores you.",
-        ].join("\n"),
-      },
-      "rogue.log": {
-        type: "text",
-        content: [
-          "ROGUE CORE",
-          "Phase 1: checksums keep it honest.",
-          "Phase 2: chants remind it of the Drift.",
-          "Phase 3: trust proves you belong here.",
-          "",
-          "Fail any phase and trace spikes hard.",
-        ].join("\n"),
-      },
-    },
-  },
 };
 
 function getLoc(name) {
@@ -9322,31 +9190,52 @@ function boot() {
 
 boot();
 function applyEscalationTextEffects(text) {
-  // Single entry point for corruption: only allow when the region/content expects it.
-  // Keeps intro/early regions readable; glitch becomes a narrative signal, not global noise.
-  let t = String(text || "");
-  if (!corruptionAllowed(t)) return t;
+  // Single entry point for corruption. Only use GLITCH_GLYPH, keep lines readable,
+  // and only when regions/content expect it. This avoids global noise and keeps
+  // glyph use thematic.
+  const raw = String(text || "");
+  if (!corruptionAllowed(raw)) return raw;
 
   const trace = state.trace || 0;
-  const trust = trustLevel();
   const corruption = corruptionLevel();
   const region = state.region && state.region.current;
   const severeRegion = region === "secureCore" || region === "cinderDepth";
 
-  // Intensity scales modestly with corruption + trace + region severity.
-  const ratio = Math.min(0.35, corruption * 0.07 + trace * 0.05 + (severeRegion ? 0.05 : 0));
-  if (ratio > 0) t = t.replace(/([A-Za-z])/g, (m) => (Math.random() < ratio ? GLITCH_GLYPH : m));
+  // Intensity capped to ~25% of characters so lines stay readable.
+  const ratio = Math.min(0.25, corruption * 0.06 + trace * 0.04 + (severeRegion ? 0.05 : 0));
+  if (ratio <= 0) return raw;
 
-  // Low trust redacts a few vowels, but never makes text unreadable.
-  const redactRatio = trust <= 1 ? 0.12 : trust === 2 ? 0.06 : 0;
-  if (redactRatio > 0) t = t.replace(/[aeiou]/gi, (m) => (Math.random() < redactRatio ? "_" : m));
-
-  return t;
+  // Deterministic mask per-line: avoids jittery randomness and keeps corruption stable.
+  const chars = raw.split("");
+  let hash = 0;
+  for (let i = 0; i < chars.length; i++) hash = (hash + chars[i].charCodeAt(0) * (i + 1)) % 9973;
+  const max = Math.max(1, Math.floor(chars.length * ratio));
+  const step = Math.max(3, Math.floor(chars.length / max));
+  let replaced = 0;
+  for (let i = 0; i < chars.length && replaced < max; i++) {
+    const c = chars[i];
+    if (!/[A-Za-z0-9]/.test(c)) continue;
+    if ((i + hash) % step === 0) {
+      chars[i] = GLITCH_GLYPH;
+      replaced += 1;
+    }
+  }
+  return chars.join("");
 }
 
 function corruptionAllowed(text) {
   // Whitelist: never corrupt core clarity output.
-  const cleanSnippets = ["Usage:", "Command error", "already", "not found", "missing", "trust state", "help", "LOCATIONS"];
+  const cleanSnippets = [
+    "Usage:",
+    "Command error",
+    "already",
+    "not found",
+    "missing",
+    "trust state",
+    "help",
+    "LOCATIONS",
+    "TRUST STATE",
+  ];
   const lower = String(text || "").toLowerCase();
   if (cleanSnippets.some((s) => lower.includes(s.toLowerCase()))) return false;
 
