@@ -3178,6 +3178,17 @@ function onRegionEnter(region) {
       });
     }
   }
+  if (region && region.id && region.id !== "introNet" && state.flags.has("glitch_path_memory")) {
+    const key = `glitch_path_echo_${region.id}`;
+    if (!state.flags.has(key)) {
+      state.flags.add(key);
+      if (state.flags.has("glitch_stabilizer")) {
+        chatPost({ channel: "#kernel", from: "watcher", body: "some cracks close when you arrive; a memory of steady hands." });
+      } else if (state.flags.has("glitch_exploiter")) {
+        chatPost({ channel: "#kernel", from: "rogue", body: "you like to pry seams open. routes remember." });
+      }
+    }
+  }
   return region;
 }
 
@@ -4349,6 +4360,138 @@ const LOCS = {
         cipher: true,
         // Intentionally corrupted: the block character represents a "missing" letter in the signal.
         content: `gur qevsg qbrfa'g gel gb oernx lbh. vg g${GLITCH_GLYPH}ebjf lbh.`,
+      },
+    },
+  },
+  "glitch.cache": {
+    title: "GLITCH.CACHE",
+    desc: [
+      "A cache of corrupted text frames stitched together by the Weavers.",
+      "Every file has holes. Your job is to repair the chant.",
+    ],
+    requirements: { flags: ["slipper_signal"], items: ["weaver.mark"], trust: 2 },
+    locks: [
+      {
+        prompt: "LOCK: present weaver.mark",
+        answer: "weaver.mark",
+        hint: "Download weaver.mark from weaver.den.",
+      },
+    ],
+    links: ["slipper.hole", "core.relic"],
+    files: {
+      "glitch.map": {
+        type: "text",
+        content: [
+          "GLITCH MAP",
+          "Fragments to gather:",
+          "- fragment.alpha (island.echo)",
+          "- fragment.beta   (cache)",
+          "- fragment.gamma  (cache)",
+          "- fragment.delta  (cache)",
+          "",
+          "Each fragment hides a word. Replace missing glyphs (█) with the obvious letter after decoding.",
+          "The final chant opens the rogue core.",
+        ].join("\n"),
+      },
+      "fragment.beta": {
+        type: "text",
+        cipher: true,
+        content: `ZVE${GLITCH_GLYPH}BE`,
+      },
+      "fragment.gamma": {
+        type: "text",
+        cipher: true,
+        content: `RZO${GLITCH_GLYPH}E`,
+      },
+      "fragment.delta": {
+        type: "text",
+        cipher: true,
+        content: `FGV${GLITCH_GLYPH}Y`,
+      },
+      "chant.txt": {
+        type: "text",
+        content: [
+          "GLITCH CHANT (BROKEN)",
+          "??? THE EMBER STILL THREAD",
+          "",
+          "Fill the missing word by repairing the fragments.",
+        ].join("\n"),
+      },
+      "stitch.s": {
+        type: "script",
+        script: {
+          name: "stitch",
+          sec: "MIDSEC",
+          code: [
+            "// @sec MIDSEC",
+            "const frags = ['fragment.alpha','fragment.beta','fragment.gamma','fragment.delta'];",
+            "const words = frags.map((f) => (ctx.read(f) || '').toUpperCase());",
+            "const repaired = words.map((w) => w.replace(/█/g, '?').replace(/\\s+/g, '').replace(/[^A-Z?]/g,''));",
+            "const chant = `${repaired[1] || '???'} THE ${repaired[2] || 'EMBER'} ${repaired[3] || 'STILL'} THREAD`;",
+            "ctx.print('Fragments: ' + repaired.join(' / '));",
+            "ctx.print('Chant: ' + chant.trim());",
+            "if (!chant.includes('?')) {",
+            "  ctx.flag('glitch_phrase_ready');",
+            "  ctx.print('Chant locked. Rogue core will listen.');",
+            "} else {",
+            "  ctx.print('Fill missing glyphs in your fragment files to finalize the chant.', 'warn');",
+            "}",
+          ].join("\n"),
+        },
+        content: [
+          "/* stitch.s */",
+          "function main(ctx,args){",
+          "  // Read fragment.* files from your drive and reconstruct the chant.",
+          "}",
+        ].join("\n"),
+      },
+    },
+  },
+  "rogue.core": {
+    title: "ROGUE.CORE",
+    desc: [
+      "A rogue AI kernel adapted from the relic. It mirrors your handle back at you.",
+      "Locks adapt to your trust level and your ability to repair glitches.",
+    ],
+    requirements: { flags: ["touched_relic", "glitch_phrase_ready", "forked"], items: ["relay.shard", "relic.key"], trust: 3 },
+    locks: [
+      {
+        prompt: "ROGUE: checksum(payload|HANDLE=<you>) (hex3)",
+        answer: () => expectedForChecksumPayload(ROGUE_PAYLOAD),
+        hint: "Read rogue.seed. Compute checksum like the primer.",
+      },
+      {
+        prompt: "ROGUE: repaired chant",
+        answer: "MIRROR THE EMBER STILL THREAD",
+        hint: "Collect and repair fragments in glitch.cache.",
+      },
+      {
+        prompt: "ROGUE: confirm trust tier (LEVEL3)",
+        answer: "LEVEL3",
+        hint: "Keep trust steady. Wait or anchor if heat spikes.",
+      },
+    ],
+    links: ["core.relic"],
+    files: {
+      "rogue.seed": {
+        type: "text",
+        content: [
+          "ROGUE SEED",
+          "payload=" + ROGUE_PAYLOAD,
+          "Expected: checksum(payload|HANDLE=<you>) -> hex3",
+          "The rogue mirrors you. Keep trust at level 3+ or it ignores you.",
+        ].join("\n"),
+      },
+      "rogue.log": {
+        type: "text",
+        content: [
+          "ROGUE CORE",
+          "Phase 1: checksums keep it honest.",
+          "Phase 2: chants remind it of the Drift.",
+          "Phase 3: trust proves you belong here.",
+          "",
+          "Fail any phase and trace spikes hard.",
+        ].join("\n"),
       },
     },
   },
@@ -5852,6 +5995,52 @@ function islandPing(args) {
   markDirty();
 }
 
+function stabilizeGlitch() {
+  if (!state.flags.has("glitch_fragment_seen")) {
+    writeLine("No unstable fragment nearby.", "dim");
+    return;
+  }
+  if (state.flags.has("glitch_exploiter")) {
+    writeLine("Signal remembers you pulled it apart.", "warn");
+    return;
+  }
+  if (state.flags.has("glitch_stabilizer")) {
+    writeLine("Thread already steadied.", "dim");
+    return;
+  }
+  state.flags.add("glitch_stabilizer");
+  state.flags.add("glitch_path_memory");
+  setCorruptionLevel(Math.max(0, corruptionLevel() - 1));
+  trustCoolDown(1, "glitch stabilize");
+  chatPost({ channel: "#kernel", from: "watcher", body: "you steady the crack. some lines stay readable now." });
+  // Future repair hook: stabilized fragments could be rebuilt later without re-parsing lore.
+  markDirty();
+}
+
+function spliceGlitch() {
+  if (!state.flags.has("glitch_fragment_seen")) {
+    writeLine("Nothing to splice.", "dim");
+    return;
+  }
+  if (state.flags.has("glitch_stabilizer")) {
+    writeLine("You already anchored the thread.", "warn");
+    return;
+  }
+  if (state.flags.has("glitch_exploiter")) {
+    writeLine("The fragment is already bleeding power.", "dim");
+    return;
+  }
+  state.flags.add("glitch_exploiter");
+  state.flags.add("glitch_path_memory");
+  state.gc = Math.max(0, (Number(state.gc) || 0) + 25);
+  trustAdjustHeat(2, "glitch splice");
+  profiledTraceRise(1, "glitch splice");
+  setCorruptionLevel(Math.min(3, corruptionLevel() + 1));
+  chatPost({ channel: "#kernel", from: "rogue", body: "you pull the crack wider. residue banks, eyes notice." });
+  // Future exploit hook: amplified corruption could be weaponized later.
+  markDirty();
+}
+
 function siphonStatus() {
   writeLine("SIPHON", "header");
   if (!state.upgrades.has("upg.siphon")) {
@@ -6880,10 +7069,26 @@ function handleLoreSignals(locName, fileName, entry) {
     const id = fileName.match(/fragment\.(alpha|beta|gamma|delta)/i);
     if (id && id[1]) {
       recordFragment(id[1].toLowerCase());
+      state.flags.add("glitch_fragment_seen");
+      if (!glitchChoiceTaken()) {
+        chatPost({
+          channel: "#kernel",
+          from: "watcher",
+          body: "fragment flexes. you could steady the thread or pull it harder.",
+        });
+      }
       const softer = softenFragmentCorruption(text);
       if (softer !== text) {
-        writeLine("static thins: " + softer, "dim");
+        const stable = state.flags.has("glitch_stabilizer");
+        const show = stable ? softer : text;
+        if (stable) {
+          // Stabilize path: clearer lore, future repair could build here.
+          writeLine("static thins: " + show, "dim");
+        } else {
+          writeLine("fragment crackles: " + show, "warn");
+        }
       }
+      if (state.flags.has("glitch_exploiter")) setCorruptionLevel(Math.min(3, corruptionLevel() + 1));
     }
   }
   Object.values(GLITCH_FRAGMENTS).forEach((frag) => {
@@ -8807,6 +9012,12 @@ function handleCommand(inputText) {
     case "ping":
       pingCommand(args);
       break;
+    case "stabilize":
+      stabilizeGlitch();
+      break;
+    case "splice":
+      spliceGlitch();
+      break;
     case "wait":
       waitTick();
       break;
@@ -9236,6 +9447,7 @@ function allCommandNames() {
     "exfiltrate",
     "restore",
     "stabilize",
+    "splice",
     "corrupt",
     "restart",
   ];
@@ -9498,6 +9710,10 @@ function corruptionAllowed(text) {
   if (corruption >= 1 && fragmentContext) return true;
   if (corruption >= 1 && rogueResponding) return true;
   return false; // Ambient/system text stays clean.
+}
+
+function glitchChoiceTaken() {
+  return state.flags.has("glitch_stabilizer") || state.flags.has("glitch_exploiter");
 }
 
 // Look for user reconstruction attempts of the glitch chant via scratchpad or drive text.
