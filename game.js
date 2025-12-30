@@ -19,6 +19,10 @@ const TRUST_MAX_LEVEL = 4;
 const TRUST_MIN_LEVEL = 1;
 const TRUST_HEAT_THRESHOLD = 6;
 const TRUST_COOLDOWN_ON_WAIT = 2;
+// Trust/heat/trace framing (in-world, never shown as glossary):
+// - Trust: long-memory of the network (changes are rare and costly).
+// - Heat: short noise from actions (rises fast, cools fast).
+// - Trace: active response when watchers move (escalates from heat/noise).
 const SEC_LEVELS = ["NULLSEC", "LOWSEC", "MIDSEC", "HIGHSEC", "FULLSEC"];
 // Drive capacity is an in-world abstraction of browser localStorage limits.
 // Keep it comfortably below typical per-origin quotas (~5MB).
@@ -276,11 +280,12 @@ function hex3(n) {
 // trace is response, trust is memory. Fires only once per save when heat rises.
 function maybeTeachSecurityMoment(delta) {
   // Only during the intro island region and only once.
-  if (state.flags.has("security_taught")) return;
+  if (state.flags.has("security_taught") || SECURITY_TEACH_SHOWN) return;
   if (state.region && state.region.current && state.region.current !== "introNet") return;
   if (trustHeat() + delta <= 0 && state.trace <= 0) return;
 
   state.flags.add("security_taught");
+  SECURITY_TEACH_SHOWN = true;
   chatPost({
     channel: "#kernel",
     from: "watcher",
@@ -313,6 +318,8 @@ function trustAdjustHeat(delta, reason) {
   state.trust.heat = next;
   maybeTeachSecurityMoment(delta);
   if (next > 0) state.storyState?.flags?.add("heat_seen");
+   // Heat implies noise; track for rogue adaptation.
+  if (delta > 0) recordRogueBehavior("noise");
   const added = discover(["trust.anchor"]);
   if (added.length) {
     chatPost({
@@ -441,11 +448,13 @@ const NON_DIRTY_COMMANDS = new Set([
   "diagnose",
   "trust",
   "regions",
+  "status",
 ]);
 
 // RegionManager is assigned later; declare upfront to avoid TDZ errors where it is referenced before definition.
 let RegionManager;
 let ESCALATION_SILENCE = 0;
+let SECURITY_TEACH_SHOWN = false;
 
 function setCorruption(enabled) {
   setCorruptionLevel(enabled ? 1 : 0);
@@ -2912,6 +2921,7 @@ const state = {
     flags: new Set(),
     failed: new Set(),
   },
+  rogueProfile: { noise: 0, careful: 0, brute: 0, failures: 0, outcomes: new Set() },
 };
 
 // RegionManager tracks named network zones (regions), which nodes they contain,
@@ -6256,7 +6266,15 @@ function tutorialNextHint() {
   tutorialAdvance();
 }
 
-function printTrustStatus() {
+function printTrustStatus(options) {
+  const opts = options || {};
+  if (opts.concise) {
+    // Narrative summary: remind players of the relationship without stats.
+    writeLine("trust holds memory; heat is noise; trace is the hand that moves.", "trust");
+    if (trustHeat() > 0) writeLine("noise is fading; anchor if you want it gone faster.", "dim");
+    if (state.trace > 0) writeLine("watchers are awake; move softly.", "warn");
+    return;
+  }
   writeLine("TRUST STATE", "header");
   writeLine(trustStatusLabel(), "dim");
   if (state.trace > 0) writeLine(`trace ${state.trace}/${state.traceMax} (heat raises faster under pressure)`, "warn");
@@ -6381,6 +6399,19 @@ function recordFragment(id) {
   }
   storyProgressEvent("fragment", { id });
   validateGlitchChant();
+}
+
+// Track tendencies for the rogue core adaptation.
+function recordRogueBehavior(kind) {
+  if (!state.rogueProfile || typeof state.rogueProfile !== "object") {
+    state.rogueProfile = { noise: 0, careful: 0, brute: 0, failures: 0, outcomes: new Set() };
+  }
+  const rp = state.rogueProfile;
+  if (!(rp.outcomes instanceof Set)) rp.outcomes = new Set(rp.outcomes || []);
+  if (kind === "noise") rp.noise += 1;
+  if (kind === "careful") rp.careful += 1;
+  if (kind === "brute") rp.brute += 1;
+  if (kind === "fail") rp.failures += 1;
 }
 
 function ensureStoryState() {
@@ -6510,6 +6541,13 @@ function validateGlitchChant() {
   // Player must reconstruct intentionally (scratchpad or drive) — no auto-complete.
   const attempt = findChantAttempt();
   const exact = attempt && attempt === chant;
+  const near =
+    attempt &&
+    !exact &&
+    chantWords.beta !== "?" &&
+    chantWords.gamma !== "?" &&
+    chantWords.delta !== "?" &&
+    ["THE", "THREAD"].every((w) => attempt.includes(w));
 
   if (haveAll && exact) {
     if (!state.flags.has("glitch_phrase_ready")) {
@@ -6524,11 +6562,14 @@ function validateGlitchChant() {
     state.flags.add("glitch_chant_value");
     state.glitchChant = chant;
     storyProgressEvent("chant_ready");
+    recordRogueBehavior("careful");
   } else {
-    // Near-miss: subtle corruption and slight heat bump, no explicit “wrong”.
-    if (attempt && haveAll && !exact) {
+    // Near-miss: subtle corruption and slight heat bump (trace when very close), no explicit “wrong”.
+    if (attempt && haveAll) {
       writeLine(applyEscalationTextEffects("chant scatters in the buffer"), "warn");
       trustAdjustHeat(1, "chant_miss");
+      if (near) state.trace = Math.min(state.traceMax, (state.trace || 0) + 1);
+      recordRogueBehavior("brute");
     }
     state.flags.delete("glitch_phrase_ready");
     state.flags.delete("glitch_phrase_clean");
@@ -7167,6 +7208,21 @@ function startBreach(locName) {
     writeLine("Loc not found.", "error");
     return;
   }
+  if (locName === "rogue.core") {
+    if (!state.flags.has("glitch_phrase_ready")) {
+      writeLine("rogue.core ignores you; chant incomplete.", "warn");
+      return;
+    }
+    if (!trustGate(3)) {
+      writeLine("rogue.core watches your trust level and discards your ping.", "warn");
+      return;
+    }
+    if (!state.flags.has("rogue_seed_read")) {
+      writeLine("rogue.core pulses back a checksum request. Read rogue.seed first.", "warn");
+      return;
+    }
+    rogueCoreAdaptiveIntro();
+  }
   RegionManager.bootstrap({ silent: true });
   state.currentRegion = state.region.current;
   const regionGate = RegionManager.canAccessNode(locName);
@@ -7178,6 +7234,21 @@ function startBreach(locName) {
       body: `Route sealed: ${regionGate.name}. Clear prior signals before it will answer.`,
     });
     return;
+  }
+  if (locName === "rogue.core") {
+    if (!state.flags.has("glitch_phrase_ready")) {
+      writeLine("rogue.core ignores you; chant incomplete.", "warn");
+      return;
+    }
+    if (!trustGate(3)) {
+      writeLine("rogue.core watches your trust level and discards your ping.", "warn");
+      return;
+    }
+    if (!state.flags.has("rogue_seed_read")) {
+      writeLine("rogue.core pulses back a checksum request. Read rogue.seed first.", "warn");
+      return;
+    }
+    rogueCoreAdaptiveIntro();
   }
   if (locName === "rogue.core") {
     if (!state.flags.has("glitch_phrase_ready")) {
@@ -7243,6 +7314,8 @@ function startBreach(locName) {
 function failBreach() {
   state.trace += 1;
   trustAdjustHeat(1, "failed lock");
+  recordRogueBehavior("fail");
+  recordRogueBehavior("brute");
   if (state.trace >= state.traceMax) {
     writeLine("TRACE LIMIT HIT. CONNECTION DROPPED.", "error");
 
@@ -7308,6 +7381,7 @@ function unlockAttempt(answer) {
   if (normalized.toUpperCase() === expected.toUpperCase()) {
     writeLine("LOCK CLEARED", "ok");
     writeLine("sys::lock.cleared", "trust");
+    if (state.trace === 0 && trustHeat() === 0) recordRogueBehavior("careful");
     state.breach.index += 1;
     if (state.breach.index >= loc.locks.length) {
       const unlockedLoc = state.breach.loc;
@@ -7613,6 +7687,13 @@ function getSaveData() {
       flags: Array.from((state.storyState && state.storyState.flags) || []),
       failed: Array.from((state.storyState && state.storyState.failed) || []),
     },
+    rogueProfile: {
+      noise: state.rogueProfile ? state.rogueProfile.noise || 0 : 0,
+      careful: state.rogueProfile ? state.rogueProfile.careful || 0 : 0,
+      brute: state.rogueProfile ? state.rogueProfile.brute || 0 : 0,
+      failures: state.rogueProfile ? state.rogueProfile.failures || 0 : 0,
+      outcomes: Array.from((state.rogueProfile && state.rogueProfile.outcomes) || []),
+    },
   };
 }
 
@@ -7735,6 +7816,16 @@ function loadState(options) {
           failed: new Set(data.storyState.failed || []),
         }
       : state.storyState || { current: "island_intro", completed: new Set(), beats: new Set(), flags: new Set(), failed: new Set() };
+  state.rogueProfile =
+    data.rogueProfile && typeof data.rogueProfile === "object"
+      ? {
+          noise: Number(data.rogueProfile.noise) || 0,
+          careful: Number(data.rogueProfile.careful) || 0,
+          brute: Number(data.rogueProfile.brute) || 0,
+          failures: Number(data.rogueProfile.failures) || 0,
+          outcomes: new Set(data.rogueProfile.outcomes || []),
+        }
+      : state.rogueProfile || { noise: 0, careful: 0, brute: 0, failures: 0, outcomes: new Set() };
   if (data.chat) {
     state.chat.channel = data.chat.channel || "#kernel";
     state.chat.channels = new Set(data.chat.channels || ["#kernel"]);
@@ -7755,6 +7846,9 @@ function loadState(options) {
   RegionManager.bootstrap({ silent: true });
   validateGlitchChant();
   ensureStoryState();
+  if (!state.rogueProfile || typeof state.rogueProfile !== "object") {
+    state.rogueProfile = { noise: 0, careful: 0, brute: 0, failures: 0, outcomes: new Set() };
+  }
   // scratchpad is user-authored; don't clear on load
   if (!opts.silent) writeLine("State loaded.", "ok");
   ensureDriveBackfill({ silent: true });
@@ -8409,6 +8503,9 @@ function handleCommand(inputText) {
     case "trust":
       printTrustStatus();
       break;
+    case "status":
+      printTrustStatus({ concise: true });
+      break;
     case "contacts":
       listContacts();
       break;
@@ -9026,5 +9123,23 @@ function findChantAttempt() {
     attempts.push(...lines);
   });
 
+  // Return the first candidate; existence alone triggers near-miss behavior to keep mystery intact.
   return attempts.find((a) => a) || null;
+}
+
+// Adaptive intro for rogue.core: tone depends on prior play (noise vs careful vs brute).
+function rogueCoreAdaptiveIntro() {
+  if (state.flags.has("rogue_intro_done")) return;
+  state.flags.add("rogue_intro_done");
+  const rp = state.rogueProfile || { noise: 0, careful: 0, brute: 0 };
+  const noisy = rp.noise > rp.careful;
+  const brute = rp.brute > rp.careful;
+  chatPost({
+    channel: "#kernel",
+    from: "archivist",
+    body: noisy
+      ? "Rogue sniffed your noise. It adapts to repetition. Move with intent."
+      : "Rogue listens. Trust steady, chant whole, checksum ready. Do not rush.",
+  });
+  if (brute) chatPost({ channel: "#kernel", from: "rogue", body: "...pattern detected. adjusting..." });
 }
