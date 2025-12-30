@@ -97,6 +97,30 @@ const NARRATIVE_CUES = {
   rogue_finale: "The rogue listens for a chant and a checksum. Bring both.",
   cinder_depths: "Depth heat leaks upward. Mantle echoes wait for a patient hand.",
 };
+// Map regions to narrative readiness: regions stay dark until the story reaches these beats.
+const REGION_STORY_GATES = {
+  introNet: "island_intro",
+  publicNet: "mesh_explore",
+  corporateNet: "trust_pressure",
+  secureCore: "rogue_finale",
+  cinderDepth: "cinder_depths",
+};
+
+function narrativeStepIndex(stepId) {
+  const idx = NARRATIVE_STEPS.findIndex((s) => s.id === stepId || s.name === stepId || s.title === stepId);
+  return idx === -1 ? 0 : idx;
+}
+
+// Regions only answer once the narrative has reached their gate beat.
+function narrativeAllowsRegion(regionId) {
+  ensureStoryState();
+  const gate = REGION_STORY_GATES[regionId];
+  if (!gate) return true;
+  const current = state.storyState ? state.storyState.current : null;
+  const currentIdx = narrativeStepIndex(current);
+  const gateIdx = narrativeStepIndex(gate);
+  return currentIdx >= gateIdx;
+}
 // Region definitions attach existing locs to narrative zones.
 // To classify a new or existing host, add its loc id to exactly one `nodes` list below.
 // You can extend this list (e.g., add a DLC region) without touching core mechanics.
@@ -431,6 +455,7 @@ function setCorruptionLevel(level) {
   if (n >= 2) state.flags.add("corrupt2");
   if (n >= 3) state.flags.add("corrupt3");
   applyCorruptionClasses();
+  storyProgressEvent("corruption", { level: n });
 }
 
 function markDirty() {
@@ -2850,6 +2875,13 @@ const state = {
   currentRegion: null,
   narrativeHint: null,
   glitchChant: null,
+  storyState: {
+    current: "island_intro",
+    completed: new Set(),
+    beats: new Set(),
+    flags: new Set(),
+    failed: new Set(),
+  },
 };
 
 // RegionManager tracks named network zones (regions), which nodes they contain,
@@ -2887,7 +2919,8 @@ RegionManager = (() => {
     const nodesOk = !nodes.length || nodes.some((node) => state.unlocked.has(node) || state.discovered.has(node));
     const flagsOk = flags.every((flag) => state.flags.has(flag));
     const flagsAnyOk = !flagsAny.length || flagsAny.some((flag) => state.flags.has(flag));
-    return regionsOk && nodesOk && flagsOk && flagsAnyOk;
+    const storyOk = narrativeAllowsRegion(def.id);
+    return regionsOk && nodesOk && flagsOk && flagsAnyOk && storyOk;
   }
 
   // Ensure older saves auto-unlock regions whose nodes are already known/unlocked.
@@ -3015,13 +3048,14 @@ RegionManager = (() => {
     ensureState();
     writeLine("REGIONS", "header");
     REGION_DEFS.forEach((def) => {
-      const open = state.region.unlocked.has(def.id) ? "[OPEN]" : "[LOCKED]";
+      const open = state.region.unlocked.has(def.id);
       const visit = state.region.visited.has(def.id) ? "visited" : "unvisited";
-      writeLine(`${open} ${def.name} (${visit})`, open === "[OPEN]" ? "ok" : "dim");
+      const label = open ? "[listening]" : "[silent]";
+      writeLine(`${label} ${def.name} (${visit})`, open ? "ok" : "dim");
       writeLine("  nodes: " + def.nodes.join(", "), "dim");
       if (!state.region.unlocked.has(def.id)) {
-        const need = canAccessNode(def.nodes[0] || "")?.hint;
-        if (need) writeLine("  needs: " + need, "dim");
+        const hint = "routing noise masks this span; follow prior signals";
+        writeLine("  hint: " + hint, "dim");
       }
     });
   }
@@ -4350,7 +4384,7 @@ function listLocs() {
     .forEach((locName) => {
       if (!RegionManager.isNodeVisible(locName)) return;
       const node = getLoc(locName);
-      const unlocked = state.unlocked.has(locName) ? "OPEN" : "LOCKED";
+      const unlocked = state.unlocked.has(locName) ? "listening" : "silent";
       const title = node ? node.title : "UNKNOWN";
       writeLine(`${locName} [${unlocked}] :: ${title}`, "dim");
     });
@@ -6265,6 +6299,10 @@ function triggerNarrativeStepForLoc(locName) {
   });
   state.narrativeHint = `${step.title || step.name}: ${cue}`;
   updateHud();
+  // Story progression can also be driven by reaching key locs.
+  if (state.storyState && state.storyState.current === step.id) {
+    storyAdvanceToNext(`loc:${locName}`);
+  }
 }
 
 function decodeCipher(type, payload) {
@@ -6308,7 +6346,88 @@ function decodeCipher(type, payload) {
 function recordFragment(id) {
   const key = `fragment_${id}`;
   state.flags.add(key);
+  if (state.storyState && state.storyState.beats) {
+    state.storyState.beats.add(key);
+  }
+  storyProgressEvent("fragment", { id });
   validateGlitchChant();
+}
+
+function ensureStoryState() {
+  if (!state.storyState || typeof state.storyState !== "object") {
+    state.storyState = { current: "island_intro", completed: new Set(), beats: new Set(), flags: new Set(), failed: new Set() };
+  }
+  const s = state.storyState;
+  if (!(s.completed instanceof Set)) s.completed = new Set(s.completed || []);
+  if (!(s.beats instanceof Set)) s.beats = new Set(s.beats || []);
+  if (!(s.flags instanceof Set)) s.flags = new Set(s.flags || []);
+  if (!(s.failed instanceof Set)) s.failed = new Set(s.failed || []);
+  if (!s.current) s.current = "island_intro";
+  return s;
+}
+
+function storyCurrentStep() {
+  ensureStoryState();
+  return NARRATIVE_STEPS.find((s) => s.id === state.storyState.current) || NARRATIVE_STEPS[0];
+}
+
+function storyAdvanceToNext(reason) {
+  ensureStoryState();
+  const current = storyCurrentStep();
+  if (current && current.id) state.storyState.completed.add(current.id);
+  const nextIdx = narrativeStepIndex(current ? current.id : null) + 1;
+  const next = NARRATIVE_STEPS[nextIdx] || current;
+  state.storyState.current = next.id || current.id;
+  const cue = NARRATIVE_CUES[next.id] || NARRATIVE_CUES[next.name] || next.summary || "signal moves";
+  chatPost({
+    channel: "#kernel",
+    from: "sys",
+    body: `[path] ${next.title || next.name || "route"} :: ${cue}`,
+  });
+  state.narrativeHint = `${next.title || next.name}: ${cue}`;
+  if (reason) state.storyState.flags.add(`advance:${reason}`);
+  markDirty();
+}
+
+// Lightweight dispatcher: move the story when meaningful actions land.
+function storyProgressEvent(kind, payload) {
+  ensureStoryState();
+  const current = storyCurrentStep();
+  const nodes = (current && current.nodes) || [];
+
+  if (kind === "breach" && payload && nodes.includes(payload.loc)) {
+    storyAdvanceToNext(`breach:${payload.loc}`);
+    return;
+  }
+
+  if (kind === "chant_ready") {
+    state.storyState.flags.add("chant_ready");
+    if (current && current.id === "glitch_arc") storyAdvanceToNext("chant");
+    return;
+  }
+
+  if (kind === "trust_anchor_heat") {
+    state.storyState.flags.add("anchor_coolant");
+    if (current && current.id === "trust_pressure") storyAdvanceToNext("anchor");
+    return;
+  }
+
+  if (kind === "corruption" && payload && payload.level >= 2) {
+    state.storyState.flags.add("corruption_seen");
+    if (current && current.id === "glitch_arc") storyAdvanceToNext("corruption");
+    return;
+  }
+
+  if (kind === "fragment" && current && current.id === "glitch_arc") {
+    if (state.storyState.beats.size >= 2) {
+      storyAdvanceToNext("fragments");
+    }
+    return;
+  }
+
+  if (kind === "core_ready" && current && current.id === "rogue_finale") {
+    storyAdvanceToNext("rogue_ready");
+  }
 }
 
 function fragmentTextToWord(text) {
@@ -6363,6 +6482,7 @@ function validateGlitchChant() {
     state.flags.add("glitch_phrase_clean");
     state.flags.add("glitch_chant_value");
     state.glitchChant = chant;
+    storyProgressEvent("chant_ready");
   } else {
     state.flags.delete("glitch_phrase_ready");
     state.flags.delete("glitch_phrase_clean");
@@ -6384,6 +6504,7 @@ function handleLoreSignals(locName, fileName, entry) {
   if (text.includes(GLITCH_GLYPH)) state.flags.add("corruption");
   if (locName === "trust.anchor") trustCoolDown(2, "anchor read");
   if (locName === "glitch.cache" && upper.includes("CHANT")) state.flags.add("glitch_chant_known");
+  if (locName === "glitch.cache") setCorruptionLevel(Math.max(corruptionLevel(), 1));
   if (upper.includes("NARRATIVE STEP")) state.flags.add("narrative_brief_seen");
   if (upper.includes("ROGUE") || upper.includes("ADAPTIVE")) state.flags.add("rogue_hint");
   if (upper.includes("MANTLE")) state.flags.add("mantle_phrase");
@@ -7049,6 +7170,7 @@ function startBreach(locName) {
     writeLine("No locks detected. Access open.", "ok");
     state.unlocked.add(locName);
     setMark("mark.breach");
+    storyProgressEvent("breach", { loc: locName });
     state.breach = null;
     return;
   }
@@ -7140,6 +7262,7 @@ function unlockAttempt(answer) {
       writeLine("STACK CLEARED. ACCESS OPEN.", "ok");
       state.unlocked.add(unlockedLoc);
       setMark("mark.breach");
+      storyProgressEvent("breach", { loc: unlockedLoc });
       if (pressure) window.clearInterval(pressure);
       writeLine(`sys::breach.success ${unlockedLoc}`, "trust");
       state.breach = null;
@@ -7208,6 +7331,9 @@ function connectLoc(locName) {
   showLoc();
   RegionManager.enterRegionByNode(locName);
   triggerNarrativeStepForLoc(locName);
+  if (locName === "trust.anchor" && trustHeat() >= TRUST_HEAT_THRESHOLD - 1) {
+    storyProgressEvent("trust_anchor_heat");
+  }
   if (!state.flags.has("seen_" + locName)) {
     state.flags.add("seen_" + locName);
     if (locName === "monument.beacon") {
@@ -7428,6 +7554,13 @@ function getSaveData() {
       pending: Array.from((state.region && state.region.pending) || []),
     },
     currentRegion: state.currentRegion || (state.region && state.region.current) || null,
+    storyState: {
+      current: state.storyState && state.storyState.current ? state.storyState.current : "island_intro",
+      completed: Array.from((state.storyState && state.storyState.completed) || []),
+      beats: Array.from((state.storyState && state.storyState.beats) || []),
+      flags: Array.from((state.storyState && state.storyState.flags) || []),
+      failed: Array.from((state.storyState && state.storyState.failed) || []),
+    },
   };
 }
 
@@ -7540,6 +7673,16 @@ function loadState(options) {
         }
       : state.region || { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() };
   state.currentRegion = data.currentRegion || (state.region && state.region.current) || null;
+  state.storyState =
+    data.storyState && typeof data.storyState === "object"
+      ? {
+          current: data.storyState.current || "island_intro",
+          completed: new Set(data.storyState.completed || []),
+          beats: new Set(data.storyState.beats || []),
+          flags: new Set(data.storyState.flags || []),
+          failed: new Set(data.storyState.failed || []),
+        }
+      : state.storyState || { current: "island_intro", completed: new Set(), beats: new Set(), flags: new Set(), failed: new Set() };
   if (data.chat) {
     state.chat.channel = data.chat.channel || "#kernel";
     state.chat.channels = new Set(data.chat.channels || ["#kernel"]);
@@ -7559,6 +7702,7 @@ function loadState(options) {
   state.unlocked.add("trust.anchor");
   RegionManager.bootstrap({ silent: true });
   validateGlitchChant();
+  ensureStoryState();
   // scratchpad is user-authored; don't clear on load
   if (!opts.silent) writeLine("State loaded.", "ok");
   ensureDriveBackfill({ silent: true });
