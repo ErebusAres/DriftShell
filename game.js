@@ -88,6 +88,7 @@ const GLITCH_FRAGMENTS = {
   gamma: { id: "gamma", clue: "EMBER", desc: "A spark that keeps burning inside signal noise." },
   delta: { id: "delta", clue: "STILL", desc: "The reminder to slow down when trace rises." },
 };
+const GLITCH_FRAGMENT_IDS = Object.keys(GLITCH_FRAGMENTS);
 // Region definitions attach existing locs to narrative zones.
 // To classify a new or existing host, add its loc id to exactly one `nodes` list below.
 // You can extend this list (e.g., add a DLC region) without touching core mechanics.
@@ -129,7 +130,7 @@ const REGION_DEFS = [
     unlock: {
       requires: ["publicNet"],
       flagsAny: ["sniffer_run", "lattice_sigil", "glitch_chant_known"],
-      nodes: ["weaver.den", "lattice.cache"],
+      nodes: ["weaver.den"],
     },
     entry: [
       "The spine hums louder than the exchange.",
@@ -140,7 +141,7 @@ const REGION_DEFS = [
     id: "secureCore",
     name: "Secure Core",
     nodes: ["core.relic", "rogue.core"],
-    unlock: { requires: ["corporateNet"], flags: ["touched_relic", "glitch_phrase_ready"], nodes: ["core.relic"] },
+    unlock: { requires: ["corporateNet"], flags: ["touched_relic", "glitch_phrase_ready"], nodes: [] },
     entry: ["A rogue process echoes here. It listens for chants and trust."],
   },
   {
@@ -2839,6 +2840,7 @@ const state = {
   trust: { level: 2, heat: 0, lastScanAt: 0 },
   region: { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() },
   currentRegion: null,
+  narrativeHint: null,
 };
 
 // RegionManager tracks named network zones (regions), which nodes they contain,
@@ -2895,6 +2897,10 @@ RegionManager = (() => {
     if (!unlockRequirementsMet(def) && !legacyUnlock(def)) return false;
     state.region.unlocked.add(regionId);
     def.nodes.forEach((node) => state.region.pending.delete(node));
+    // Auto-discover any nodes that were held back while the region was locked.
+    def.nodes.forEach((node) => {
+      if (!state.discovered.has(node)) state.discovered.add(node);
+    });
     markDirty();
     if (!silent) {
       chatPost({
@@ -2928,7 +2934,10 @@ RegionManager = (() => {
     ensureState();
     const regionId = regionForNode(node);
     if (!regionId) return;
-    if (!state.region.unlocked.has(regionId)) state.region.pending.add(node);
+    if (!state.region.unlocked.has(regionId)) {
+      state.region.pending.add(node);
+      return;
+    }
   }
 
   function isNodeVisible(node) {
@@ -3012,6 +3021,7 @@ RegionManager = (() => {
     syncUnlocks,
     bootstrap,
     regionForNode,
+    isRegionUnlocked: (regionId) => state.region && state.region.unlocked instanceof Set && state.region.unlocked.has(regionId),
     isNodeVisible,
     canAccessNode,
     enterRegionByNode,
@@ -4284,7 +4294,9 @@ function discover(locs) {
   const newly = [];
   locs.forEach((loc) => {
     RegionManager.noteDiscovery(loc);
-    if (!state.discovered.has(loc)) {
+    const regionId = RegionManager.regionForNode(loc);
+    const regionLocked = regionId && !RegionManager.isRegionUnlocked(regionId);
+    if (!state.discovered.has(loc) && !regionLocked) {
       state.discovered.add(loc);
       newly.push(loc);
     }
@@ -4803,6 +4815,7 @@ function updateDriveContent(id, nextContent, meta) {
     editedBy: state.handle || "ghost",
     ...(meta && typeof meta === "object" ? meta : {}),
   };
+  validateGlitchChant();
   return { ok: true, id: key, bytes: nextBytes, used: nextUsed, max };
 }
 
@@ -6226,6 +6239,23 @@ function listInventory() {
   }
 }
 
+// Notify when a narrative step is reached for the first time.
+function triggerNarrativeStepForLoc(locName) {
+  const step = NARRATIVE_STEPS.find((s) => (s.nodes || []).includes(locName));
+  if (!step) return;
+  const key = `narrative_step_${step.id || step.name || step.title}`;
+  if (state.flags.has(key)) return;
+  state.flags.add(key);
+  const summary = step.summary || "Signal shifts.";
+  chatPost({
+    channel: "#kernel",
+    from: "sys",
+    body: `[path] ${step.title || step.name || "route"} :: ${summary}`,
+  });
+  state.narrativeHint = `${step.title || step.name}: ${summary}`;
+  updateHud();
+}
+
 function decodeCipher(type, payload) {
   const data = payload || state.lastCipher;
   if (!data) {
@@ -6260,14 +6290,65 @@ function decodeCipher(type, payload) {
   });
   if (upper.includes("ROGUE") || upper.includes("ADAPT")) state.flags.add("rogue_hint");
   if (upper.includes("MANTLE")) state.flags.add("mantle_phrase");
+  validateGlitchChant();
   storyChatTick();
 }
 
 function recordFragment(id) {
   const key = `fragment_${id}`;
   state.flags.add(key);
-  if (Object.values(GLITCH_FRAGMENTS).every((f) => state.flags.has(`fragment_${f.id}`))) {
+  validateGlitchChant();
+}
+
+function fragmentTextToWord(text) {
+  return String(text || "")
+    .replace(new RegExp(GLITCH_GLYPH, "g"), "")
+    .replace(/[^A-Z]/gi, "")
+    .toUpperCase();
+}
+
+function glitchFragmentsFromDrive() {
+  const out = [];
+  Object.keys(state.drive || {}).forEach((id) => {
+    const entry = state.drive[id];
+    if (!entry) return;
+    const name = entry.name || id;
+    const m = String(name || "").match(/fragment\.(alpha|beta|gamma|delta)/i);
+    if (m && m[1]) {
+      out.push({ id: m[1].toLowerCase(), text: String(entry.content || ""), source: id });
+    }
+  });
+  return out;
+}
+
+// Validate glitch phrase assembly: all fragments must be cleaned (no GLITCH_GLYPH)
+// and contribute to the chant. Only then should glitch_phrase_ready be set.
+function validateGlitchChant() {
+  const entries = glitchFragmentsFromDrive();
+  const cleaned = new Map();
+  entries.forEach((entry) => {
+    if (!String(entry.text || "").includes(GLITCH_GLYPH)) {
+      cleaned.set(entry.id, fragmentTextToWord(entry.text));
+    }
+  });
+  const haveAll = GLITCH_FRAGMENT_IDS.every((id) => cleaned.has(id));
+  const chantWords = {
+    beta: cleaned.get("beta") || "?",
+    gamma: cleaned.get("gamma") || "?",
+    delta: cleaned.get("delta") || "?",
+  };
+  const chant = `${chantWords.beta} THE ${chantWords.gamma} ${chantWords.delta} THREAD`.trim();
+
+  if (haveAll && !chant.includes("?")) {
     state.flags.add("glitch_phrase_ready");
+    state.flags.add("glitch_phrase_clean");
+    state.flags.add("glitch_chant_value");
+    state.glitchChant = chant;
+  } else {
+    state.flags.delete("glitch_phrase_ready");
+    state.flags.delete("glitch_phrase_clean");
+    state.flags.delete("glitch_chant_value");
+    state.glitchChant = null;
   }
 }
 
@@ -6287,6 +6368,8 @@ function handleLoreSignals(locName, fileName, entry) {
   if (upper.includes("NARRATIVE STEP")) state.flags.add("narrative_brief_seen");
   if (upper.includes("ROGUE") || upper.includes("ADAPTIVE")) state.flags.add("rogue_hint");
   if (upper.includes("MANTLE")) state.flags.add("mantle_phrase");
+  if (locName === "rogue.core" && fileName.toLowerCase() === "rogue.seed") state.flags.add("rogue_seed_read");
+  validateGlitchChant();
 }
 
 const trustScripts = {
@@ -6664,6 +6747,7 @@ function updateHud() {
       hint.textContent = `Objective: ${current.title} — ${current.hint}`;
     } else {
       hint.textContent =
+        state.narrativeHint ||
         "Type `help` for commands. Use `scripts` to list available scripts.";
     }
   }
@@ -6672,6 +6756,7 @@ function updateHud() {
 function storyChatTick() {
   if (!state.handle) return;
   RegionManager.bootstrap({ silent: true });
+  triggerNarrativeStepForLoc(state.loc);
   if (state.loc === "home.hub" && !state.flags.has("chat_intro")) {
     state.flags.add("chat_intro");
     chatPost({
@@ -6894,8 +6979,27 @@ function startBreach(locName) {
   state.currentRegion = state.region.current;
   const regionGate = RegionManager.canAccessNode(locName);
   if (!regionGate.ok) {
-    writeLine(`Region sealed: ${regionGate.name} (${regionGate.hint || "route cooling"})`, "warn");
+    writeLine(`signal refused :: ${regionGate.name} stays dark (${regionGate.hint || "route cooling"})`, "warn");
+    chatPost({
+      channel: "#kernel",
+      from: "switchboard",
+      body: `Route sealed: ${regionGate.name}. Clear prior signals before it will answer.`,
+    });
     return;
+  }
+  if (locName === "rogue.core") {
+    if (!state.flags.has("glitch_phrase_ready")) {
+      writeLine("rogue.core ignores you; chant incomplete.", "warn");
+      return;
+    }
+    if (!trustGate(3)) {
+      writeLine("rogue.core watches your trust level and discards your ping.", "warn");
+      return;
+    }
+    if (!state.flags.has("rogue_seed_read")) {
+      writeLine("rogue.core pulses back a checksum request. Read rogue.seed first.", "warn");
+      return;
+    }
   }
   if (!state.discovered.has(locName)) {
     writeLine("Loc not discovered.", "warn");
@@ -7041,7 +7145,12 @@ function connectLoc(locName) {
   state.currentRegion = state.region.current;
   const regionGate = RegionManager.canAccessNode(locName);
   if (!regionGate.ok) {
-    writeLine(`Region sealed: ${regionGate.name} (${regionGate.hint || "route cooling"})`, "warn");
+    writeLine(`signal refused :: ${regionGate.name} stays dark (${regionGate.hint || "route cooling"})`, "warn");
+    chatPost({
+      channel: "#kernel",
+      from: "switchboard",
+      body: `Route sealed: ${regionGate.name}. Clear prior signals before it will answer.`,
+    });
     return;
   }
   if (!requirementsMet(locName)) {
@@ -7074,6 +7183,7 @@ function connectLoc(locName) {
   state.loc = locName;
   showLoc();
   RegionManager.enterRegionByNode(locName);
+  triggerNarrativeStepForLoc(locName);
   if (!state.flags.has("seen_" + locName)) {
     state.flags.add("seen_" + locName);
     if (locName === "monument.beacon") {
@@ -7424,6 +7534,7 @@ function loadState(options) {
   state.discovered.add("trust.anchor");
   state.unlocked.add("trust.anchor");
   RegionManager.bootstrap({ silent: true });
+  validateGlitchChant();
   // scratchpad is user-authored; don't clear on load
   if (!opts.silent) writeLine("State loaded.", "ok");
   ensureDriveBackfill({ silent: true });
