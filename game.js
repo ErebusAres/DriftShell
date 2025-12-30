@@ -5789,12 +5789,14 @@ function unlockAttempt(answer) {
     writeLine("sys::lock.cleared", "trust");
     state.breach.index += 1;
     if (state.breach.index >= loc.locks.length) {
+      const unlockedLoc = state.breach.loc;
       writeLine("STACK CLEARED. ACCESS OPEN.", "ok");
-      state.unlocked.add(state.breach.loc);
+      state.unlocked.add(unlockedLoc);
       setMark("mark.breach");
       if (pressure) window.clearInterval(pressure);
-      writeLine(`sys::breach.success ${state.breach.loc}`, "trust");
+      writeLine(`sys::breach.success ${unlockedLoc}`, "trust");
       state.breach = null;
+      connectLoc(unlockedLoc);
       return;
     }
     writeLine(loc.locks[state.breach.index].prompt, "warn");
