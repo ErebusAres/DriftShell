@@ -312,6 +312,7 @@ function trustAdjustHeat(delta, reason) {
   const next = Math.max(0, trustHeat() + delta);
   state.trust.heat = next;
   maybeTeachSecurityMoment(delta);
+  if (next > 0) state.storyState?.flags?.add("heat_seen");
   const added = discover(["trust.anchor"]);
   if (added.length) {
     chatPost({
@@ -325,6 +326,7 @@ function trustAdjustHeat(delta, reason) {
     state.trust.heat = Math.max(0, next - TRUST_HEAT_THRESHOLD);
     if (state.trust.level > TRUST_MIN_LEVEL) {
       state.trust.level -= 1;
+      // Persist consequence: later regions will react to lower trust via tone and corruption.
       chatPost({
         channel: "#kernel",
         from: "sys",
@@ -443,6 +445,7 @@ const NON_DIRTY_COMMANDS = new Set([
 
 // RegionManager is assigned later; declare upfront to avoid TDZ errors where it is referenced before definition.
 let RegionManager;
+let ESCALATION_SILENCE = 0;
 
 function setCorruption(enabled) {
   setCorruptionLevel(enabled ? 1 : 0);
@@ -474,6 +477,14 @@ function setCorruptionLevel(level) {
   if (n >= 3) state.flags.add("corrupt3");
   applyCorruptionClasses();
   storyProgressEvent("corruption", { level: n });
+  if (n >= 2 && !state.flags.has("trace_corrupt_escalated")) {
+    state.flags.add("trace_corrupt_escalated");
+    chatPost({
+      channel: "#kernel",
+      from: "watcher",
+      body: "signal warps under strain. some replies may distort.",
+    });
+  }
 }
 
 function markDirty() {
@@ -1579,7 +1590,7 @@ async function pollLocalFolderChanges() {
 function writeLine(text, kind) {
   const line = document.createElement("div");
   line.className = `line${kind ? " " + kind : ""}`;
-  renderTerminalRich(line, String(text));
+  renderTerminalRich(line, applyEscalationTextEffects(String(text)));
   screen.appendChild(line);
   screen.scrollTop = screen.scrollHeight;
 }
@@ -1810,6 +1821,7 @@ function getKnownNamesRegex() {
 function renderTerminalRich(container, text) {
   // Light token highlighting to mimic hackmud coloring.
   // Keep it safe: create spans, don't inject HTML.
+  text = applyEscalationTextEffects(String(text || ""));
   const nameRegex = getKnownNamesRegex();
   const patterns = [
     { re: /\bscripts\.trust(?:\.[a-zA-Z0-9_.]+)?\b/g, cls: "tok trust" },
@@ -6455,6 +6467,14 @@ function fragmentTextToWord(text) {
     .toUpperCase();
 }
 
+// As corruption rises or trust dips, fragments momentarily reveal more.
+function softenFragmentCorruption(text) {
+  const clarity = corruptionLevel() + (trustLevel() <= 2 ? 1 : 0);
+  if (clarity <= 0) return text;
+  const ratio = Math.min(0.6, clarity * 0.15);
+  return String(text || "").replace(new RegExp(GLITCH_GLYPH, "g"), (m) => (Math.random() < ratio ? "" : m));
+}
+
 function glitchFragmentsFromDrive() {
   const out = [];
   Object.keys(state.drive || {}).forEach((id) => {
@@ -6463,7 +6483,7 @@ function glitchFragmentsFromDrive() {
     const name = entry.name || id;
     const m = String(name || "").match(/fragment\.(alpha|beta|gamma|delta)/i);
     if (m && m[1]) {
-      out.push({ id: m[1].toLowerCase(), text: String(entry.content || ""), source: id });
+      out.push({ id: m[1].toLowerCase(), text: softenFragmentCorruption(entry.content), source: id });
     }
   });
   return out;
@@ -6487,9 +6507,12 @@ function validateGlitchChant() {
   };
   const chant = `${chantWords.beta} THE ${chantWords.gamma} ${chantWords.delta} THREAD`.trim();
 
-  if (haveAll && !chant.includes("?")) {
+  // Player must reconstruct intentionally (scratchpad or drive) — no auto-complete.
+  const attempt = findChantAttempt();
+  const exact = attempt && attempt === chant;
+
+  if (haveAll && exact) {
     if (!state.flags.has("glitch_phrase_ready")) {
-      // Single moment of realization: announce once when the chant is whole.
       chatPost({
         channel: "#kernel",
         from: "weaver",
@@ -6502,6 +6525,11 @@ function validateGlitchChant() {
     state.glitchChant = chant;
     storyProgressEvent("chant_ready");
   } else {
+    // Near-miss: subtle corruption and slight heat bump, no explicit “wrong”.
+    if (attempt && haveAll && !exact) {
+      writeLine(applyEscalationTextEffects("chant scatters in the buffer"), "warn");
+      trustAdjustHeat(1, "chant_miss");
+    }
     state.flags.delete("glitch_phrase_ready");
     state.flags.delete("glitch_phrase_clean");
     state.flags.delete("glitch_chant_value");
@@ -6514,7 +6542,13 @@ function handleLoreSignals(locName, fileName, entry) {
   const upper = text.toUpperCase();
   if (fileName.toLowerCase().includes("fragment")) {
     const id = fileName.match(/fragment\.(alpha|beta|gamma|delta)/i);
-    if (id && id[1]) recordFragment(id[1].toLowerCase());
+    if (id && id[1]) {
+      recordFragment(id[1].toLowerCase());
+      const softer = softenFragmentCorruption(text);
+      if (softer !== text) {
+        writeLine("static thins: " + softer, "dim");
+      }
+    }
   }
   Object.values(GLITCH_FRAGMENTS).forEach((frag) => {
     if (upper.includes(frag.clue)) recordFragment(frag.id);
@@ -8951,3 +8985,46 @@ function boot() {
 }
 
 boot();
+function applyEscalationTextEffects(text) {
+  let t = String(text || "");
+  const trace = state.trace || 0;
+  const trust = trustLevel();
+  // Trace corruption: as trace rises, sprinkle glitch glyphs lightly.
+  if (trace >= 2) {
+    const ratio = Math.min(0.3, trace / Math.max(1, state.traceMax) / 2);
+    t = t.replace(/([A-Za-z])/g, (m) => (Math.random() < ratio ? GLITCH_GLYPH : m));
+  }
+  // Low trust tone: redact some vowels to make responses feel colder.
+  if (trust <= 1) {
+    t = t.replace(/[aeiou]/gi, (m) => (Math.random() < 0.3 ? "_" : m));
+  } else if (trust === 2) {
+    t = t.replace(/[aeiou]/gi, (m) => (Math.random() < 0.15 ? "_" : m));
+  }
+  return t;
+}
+
+// Look for user reconstruction attempts of the glitch chant via scratchpad or drive text.
+function findChantAttempt() {
+  const attempts = [];
+  try {
+    if (scratchPad && scratchPad.value) {
+      scratchPad.value
+        .split("\n")
+        .map((l) => l.trim().toUpperCase())
+        .filter((l) => l.includes("THREAD"))
+        .forEach((l) => attempts.push(l));
+    }
+  } catch {}
+
+  Object.keys(state.drive || {}).forEach((id) => {
+    const entry = state.drive[id];
+    if (!entry || typeof entry.content !== "string") return;
+    const lines = String(entry.content || "")
+      .split("\n")
+      .map((l) => l.trim().toUpperCase())
+      .filter((l) => l.includes("THREAD"));
+    attempts.push(...lines);
+  });
+
+  return attempts.find((a) => a) || null;
+}
