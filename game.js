@@ -9236,8 +9236,8 @@ function applyEscalationTextEffects(text) {
   const region = state.region && state.region.current;
   const severeRegion = region === "secureCore" || region === "cinderDepth";
 
-  // Intensity capped to ~25% of characters so lines stay readable.
-  const ratio = Math.min(0.25, corruption * 0.06 + trace * 0.04 + (severeRegion ? 0.05 : 0));
+  // Intensity capped to ~18% of characters to preserve nouns/commands (rule: 15–20% max).
+  const ratio = Math.min(0.18, corruption * 0.06 + trace * 0.04 + (severeRegion ? 0.05 : 0));
   if (ratio <= 0) return raw;
 
   // Deterministic mask per-line: avoids jittery randomness and keeps corruption stable.
@@ -9250,6 +9250,8 @@ function applyEscalationTextEffects(text) {
   for (let i = 0; i < chars.length && replaced < max; i++) {
     const c = chars[i];
     if (!/[A-Za-z0-9]/.test(c)) continue;
+    // Preserve key nouns/commands: avoid replacing when adjacent to separators that mark locs/handles.
+    if (/[.@/:_]/.test(chars[i - 1] || "") || /[.@/:_]/.test(chars[i + 1] || "")) continue;
     if ((i + hash) % step === 0) {
       chars[i] = GLITCH_GLYPH;
       replaced += 1;
@@ -9274,22 +9276,26 @@ function corruptionAllowed(text) {
   const lower = String(text || "").toLowerCase();
   if (cleanSnippets.some((s) => lower.includes(s.toLowerCase()))) return false;
 
-  // Region gating: only glitch in severe regions or corrupted/glitch content.
   const loc = state.loc || "";
-  const region = state.region && state.region.current;
-  const allowedRegions = new Set(["secureCore", "cinderDepth"]);
-  const severeRegion = allowedRegions.has(region);
-  const corruptedLocs = new Set(["rogue.core", "core.relic", "glitch.cache", "slipper.hole", "deep.slate", "trench.node", "cinder.core"]);
+  const region = state.currentRegion || (state.region && state.region.current) || "";
+  const corruption = corruptionLevel();
 
+  // Glitch zones: only hosts flagged for corruption, or regions explicitly marked severe.
+  const glitchLocs = new Set(["rogue.core", "core.relic", "glitch.cache", "slipper.hole", "deep.slate", "trench.node", "cinder.core"]);
+  const glitchRegions = new Set(["secureCore", "cinderDepth"]);
+  const inGlitchZone = glitchLocs.has(loc) || glitchRegions.has(region);
+
+  // Content triggers: partial fragments or rogue core responses may carry glyphs.
   const hasGlyph = String(text || "").includes(GLITCH_GLYPH);
-  const looksGlitch = /fragment\.|glitch|rogue|corrupt/i.test(text || "");
+  const fragmentContext = /fragment\.(alpha|beta|gamma|delta)/i.test(text || "") || hasGlyph;
+  const rogueResponding = /rogue/i.test(text || "") && (loc === "rogue.core" || glitchRegions.has(region));
 
-  // Only allow corruption when the content is explicitly corrupted OR the region is marked severe.
-  if (corruptedLocs.has(loc)) return true;
-  if (looksGlitch || hasGlyph) return true; // e.g., glitch fragments/logs anywhere.
-  if (severeRegion && (loc === "core.relic" || loc === "rogue.core")) return true;
-  if (severeRegion) return true;
-  return false; // Early regions stay clean.
+  // Glitch allowed only when justified: elevated corruption, glitch zones, fragment repair, or rogue response.
+  if (corruption >= 2) return true;
+  if (inGlitchZone) return true;
+  if (fragmentContext) return true;
+  if (rogueResponding) return true;
+  return false; // Ambient/system text stays clean.
 }
 
 // Look for user reconstruction attempts of the glitch chant via scratchpad or drive text.
