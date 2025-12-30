@@ -4251,15 +4251,18 @@ function startNextDownloadIfIdle() {
 
   // Downloads should be noticeable by default; upgrades should feel meaningful.
   // Keep times game-y but not annoying.
-  const base = 1500;
-  const scaled = Math.floor(size / 3);
-  const jitter = Math.floor(Math.random() * 420);
-  let durationMs = Math.max(1400, Math.min(12_000, base + scaled + jitter));
+  const base = 2400;
+  const scaled = Math.floor(size * 8);
+  const jitter = Math.floor(Math.random() * 700);
+  let durationMs = Math.max(2000, Math.min(18_000, base + scaled + jitter));
+  if (entry.type === "upgrade") durationMs = Math.floor(durationMs * 1.6);
+  else if (entry.type === "item") durationMs = Math.floor(durationMs * 1.2);
+  else if (entry.type === "text") durationMs = Math.floor(durationMs * 0.9);
 
   let mult = 1.0;
   if (state.upgrades.has("upg.modem")) mult *= 0.7;
   if (state.upgrades.has("upg.backbone")) mult *= 0.5;
-  durationMs = Math.max(650, Math.floor(durationMs * mult));
+  durationMs = Math.max(900, Math.floor(durationMs * mult));
 
   state.downloads.active = {
     loc: next.loc,
@@ -4381,7 +4384,16 @@ function downloadCommand(pattern) {
 function downloadsStatus() {
   writeLine("DOWNLOADS", "header");
   if (state.downloads.active) {
-    writeLine(`active: ${state.downloads.active.file}`, "dim");
+    const now = Date.now();
+    const elapsed = now - state.downloads.active.startedAt;
+    const pct = Math.max(
+      0,
+      Math.min(100, Math.floor((elapsed / state.downloads.active.durationMs) * 100))
+    );
+    const barWidth = 18;
+    const filled = Math.round((pct / 100) * barWidth);
+    const bar = `[${"#".repeat(filled)}${".".repeat(barWidth - filled)}]`;
+    writeLine(`active: ${state.downloads.active.file} ${bar} ${pct}%`, "dim");
   } else {
     writeLine("active: (none)", "dim");
   }
