@@ -352,6 +352,7 @@ function trustAdjustHeat(delta, reason) {
   // Heat implies noise; track for adaptation.
   if (delta > 0) recordRogueBehavior("noise");
   if (delta > 0) recordBehavior("noise");
+  maybeLockTrustProfile(reason || "heat");
   const added = discover(["trust.anchor"]);
   if (added.length) {
     chatPost({
@@ -397,6 +398,7 @@ function trustCoolDown(amount, reason) {
     recordBehavior("patient");
     recordRogueBehavior("careful");
     watcherProfileTick();
+    maybeLockTrustProfile(reason || "wait");
     const region = state.currentRegion || (state.region && state.region.current);
     if (region === "introNet" && priorHeat > next && !introMemoryState().patienceNotice) {
       introMemoryState().patienceNotice = true;
@@ -2959,6 +2961,7 @@ const state = {
   currentRegion: null,
   narrativeHint: null,
   glitchChant: null,
+  trustProfile: null,
   introMemory: { pingCount: 0, pingStreak: 0, lastPingAt: 0, heatSpikes: 0, traceNotice: false, patienceNotice: false },
   storyState: {
     current: "island_intro",
@@ -4360,6 +4363,138 @@ const LOCS = {
         cipher: true,
         // Intentionally corrupted: the block character represents a "missing" letter in the signal.
         content: `gur qevsg qbrfa'g gel gb oernx lbh. vg g${GLITCH_GLYPH}ebjf lbh.`,
+      },
+    },
+  },
+  "glitch.cache": {
+    title: "GLITCH.CACHE",
+    desc: [
+      "A cache of corrupted text frames stitched together by the Weavers.",
+      "Every file has holes. Your job is to repair the chant.",
+    ],
+    requirements: { flags: ["slipper_signal"], items: ["weaver.mark"], trust: 2 },
+    locks: [
+      {
+        prompt: "LOCK: present weaver.mark",
+        answer: "weaver.mark",
+        hint: "Download weaver.mark from weaver.den.",
+      },
+    ],
+    links: ["slipper.hole", "core.relic"],
+    files: {
+      "glitch.map": {
+        type: "text",
+        content: [
+          "GLITCH MAP",
+          "Fragments to gather:",
+          "- fragment.alpha (island.echo)",
+          "- fragment.beta   (cache)",
+          "- fragment.gamma  (cache)",
+          "- fragment.delta  (cache)",
+          "",
+          "Each fragment hides a word. Replace missing glyphs (█) with the obvious letter after decoding.",
+          "The final chant opens the rogue core.",
+        ].join("\n"),
+      },
+      "fragment.beta": {
+        type: "text",
+        cipher: true,
+        content: `ZVE${GLITCH_GLYPH}BE`,
+      },
+      "fragment.gamma": {
+        type: "text",
+        cipher: true,
+        content: `RZO${GLITCH_GLYPH}E`,
+      },
+      "fragment.delta": {
+        type: "text",
+        cipher: true,
+        content: `FGV${GLITCH_GLYPH}Y`,
+      },
+      "chant.txt": {
+        type: "text",
+        content: [
+          "GLITCH CHANT (BROKEN)",
+          "??? THE EMBER STILL THREAD",
+          "",
+          "Fill the missing word by repairing the fragments.",
+        ].join("\n"),
+      },
+      "stitch.s": {
+        type: "script",
+        script: {
+          name: "stitch",
+          sec: "MIDSEC",
+          code: [
+            "// @sec MIDSEC",
+            "const frags = ['fragment.alpha','fragment.beta','fragment.gamma','fragment.delta'];",
+            "const words = frags.map((f) => (ctx.read(f) || '').toUpperCase());",
+            "const repaired = words.map((w) => w.replace(/█/g, '?').replace(/\\s+/g, '').replace(/[^A-Z?]/g,''));",
+            "const chant = `${repaired[1] || '???'} THE ${repaired[2] || 'EMBER'} ${repaired[3] || 'STILL'} THREAD`;",
+            "ctx.print('Fragments: ' + repaired.join(' / '));",
+            "ctx.print('Chant: ' + chant.trim());",
+            "if (!chant.includes('?')) {",
+            "  ctx.flag('glitch_phrase_ready');",
+            "  ctx.print('Chant locked. Rogue core will listen.');",
+            "} else {",
+            "  ctx.print('Fill missing glyphs in your fragment files to finalize the chant.', 'warn');",
+            "}",
+          ].join("\n"),
+        },
+        content: [
+          "/* stitch.s */",
+          "function main(ctx,args){",
+          "  // Read fragment.* files from your drive and reconstruct the chant.",
+          "}",
+        ].join("\n"),
+      },
+    },
+  },
+  "rogue.core": {
+    title: "ROGUE.CORE",
+    desc: [
+      "A rogue AI kernel adapted from the relic. It mirrors your handle back at you.",
+      "Locks adapt to your trust level and your ability to repair glitches.",
+    ],
+    requirements: { flags: ["touched_relic", "glitch_phrase_ready", "forked"], items: ["relay.shard", "relic.key"], trust: 3 },
+    locks: [
+      {
+        prompt: "ROGUE: checksum(payload|HANDLE=<you>) (hex3)",
+        answer: () => expectedForChecksumPayload(ROGUE_PAYLOAD),
+        hint: "Read rogue.seed. Compute checksum like the primer.",
+      },
+      {
+        prompt: "ROGUE: repaired chant",
+        answer: "MIRROR THE EMBER STILL THREAD",
+        hint: "Collect and repair fragments in glitch.cache.",
+      },
+      {
+        prompt: "ROGUE: confirm trust tier (LEVEL3)",
+        answer: "LEVEL3",
+        hint: "Keep trust steady. Wait or anchor if heat spikes.",
+      },
+    ],
+    links: ["core.relic"],
+    files: {
+      "rogue.seed": {
+        type: "text",
+        content: [
+          "ROGUE SEED",
+          "payload=" + ROGUE_PAYLOAD,
+          "Expected: checksum(payload|HANDLE=<you>) -> hex3",
+          "The rogue mirrors you. Keep trust at level 3+ or it ignores you.",
+        ].join("\n"),
+      },
+      "rogue.log": {
+        type: "text",
+        content: [
+          "ROGUE CORE",
+          "Phase 1: checksums keep it honest.",
+          "Phase 2: chants remind it of the Drift.",
+          "Phase 3: trust proves you belong here.",
+          "",
+          "Fail any phase and trace spikes hard.",
+        ].join("\n"),
       },
     },
   },
@@ -6038,6 +6173,7 @@ function spliceGlitch() {
   setCorruptionLevel(Math.min(3, corruptionLevel() + 1));
   chatPost({ channel: "#kernel", from: "rogue", body: "you pull the crack wider. residue banks, eyes notice." });
   // Future exploit hook: amplified corruption could be weaponized later.
+  maybeLockTrustProfile("glitch");
   markDirty();
 }
 
@@ -6722,6 +6858,7 @@ function behaviorToneNudge() {
 function watcherTraceReact(reason) {
   const dom = dominantBehavior();
   const bias = behaviorBias();
+  const locked = state.flags.has("trust_profile_locked") ? state.trustProfile || dom : null;
   // Profiling: watcher tone softens or sharpens based on cadence + recent pressure.
   const note =
     dom === "noise"
@@ -6733,10 +6870,16 @@ function watcherTraceReact(reason) {
           : bias.tranquil && (state.trace || 0) === 0
             ? "cadence noted; routes stay loose for a beat."
             : "cadence noted; trace routes tighten.";
+  const lockedTail =
+    locked === "noise" || locked === "aggressive"
+      ? " memory already formed."
+      : locked === "patient" || locked === "careful"
+        ? " stillness already on record."
+        : "";
   chatPost({
     channel: "#kernel",
     from: "watcher",
-    body: reason ? `${note} (${reason})` : note,
+    body: reason ? `${note}${lockedTail ? " —" + lockedTail : ""} (${reason})` : note + (lockedTail ? " —" + lockedTail : ""),
   });
 }
 
@@ -7765,6 +7908,15 @@ function startBreach(locName) {
     writeLine("Loc not discovered.", "warn");
     return;
   }
+  if (locName === "archives.arc" && state.flags.has("trust_profile_locked")) {
+    // Future consequence: trust memory nudges access pressure without blocking.
+    if (state.trustProfile === "noise" || state.trustProfile === "aggressive") {
+      trustAdjustHeat(1, "memory push");
+      profiledTraceRise(1, "memory push");
+    } else if (state.trustProfile === "patient" || state.trustProfile === "careful") {
+      trustCoolDown(1, "memory ease");
+    }
+  }
   if (state.unlocked.has(locName)) {
     writeLine("Loc already unlocked.", "dim");
     return;
@@ -8174,6 +8326,7 @@ function getSaveData() {
     lastCipher: state.lastCipher,
     localSync: state.localSync,
     trust: state.trust,
+    trustProfile: state.trustProfile,
     region: {
       current: state.region && state.region.current ? state.region.current : null,
       unlocked: Array.from((state.region && state.region.unlocked) || []),
@@ -8274,6 +8427,7 @@ function loadState(options) {
     data.wait && typeof data.wait === "object"
       ? { lastAt: Number(data.wait.lastAt) || 0, streak: Number(data.wait.streak) || 0 }
       : state.wait || { lastAt: 0, streak: 0 };
+  state.trustProfile = data.trustProfile || null;
   state.introMemory =
     data.introMemory && typeof data.introMemory === "object"
       ? {
@@ -9714,6 +9868,28 @@ function corruptionAllowed(text) {
 
 function glitchChoiceTaken() {
   return state.flags.has("glitch_stabilizer") || state.flags.has("glitch_exploiter");
+}
+
+function maybeLockTrustProfile(trigger) {
+  if (state.flags.has("trust_profile_locked")) return;
+  const region = state.currentRegion || (state.region && state.region.current);
+  if (!region || region === "introNet") return; // Intro stays consequence-free.
+  const bp = state.behaviorProfile || {};
+  const total = (bp.noise || 0) + (bp.careful || 0) + (bp.aggressive || 0) + (bp.patient || 0);
+  if (total < 5) return; // Wait for a few signals to establish cadence.
+  const dom = dominantBehavior();
+  if (!dom) return;
+  const noisyMoment = trigger && /heat|trace|glitch splice/i.test(trigger);
+  const patientMoment = trigger && /wait|anchor|cool|stabilize/i.test(trigger);
+  if (!noisyMoment && !patientMoment) return;
+  state.flags.add("trust_profile_locked");
+  state.trustProfile = dom;
+  state.flags.add(`trust_profile_${dom}`);
+  // One optional whisper: the net keeps memory; no UI, no prompt.
+  if (!state.flags.has("trust_profile_hint")) {
+    state.flags.add("trust_profile_hint");
+    chatPost({ channel: "#kernel", from: "watcher", body: "the net remembers this." });
+  }
 }
 
 // Look for user reconstruction attempts of the glitch chant via scratchpad or drive text.
