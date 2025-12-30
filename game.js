@@ -88,78 +88,6 @@ const GLITCH_FRAGMENTS = {
   gamma: { id: "gamma", clue: "EMBER", desc: "A spark that keeps burning inside signal noise." },
   delta: { id: "delta", clue: "STILL", desc: "The reminder to slow down when trace rises." },
 };
-// Region definitions attach existing locs to narrative zones.
-// To classify a new or existing host, add its loc id to exactly one `nodes` list below.
-const REGION_DEFS = [
-  {
-    id: "intro_mesh",
-    name: "Isolated Mesh",
-    nodes: ["home.hub", "training.node", "island.grid", "island.echo", "trust.anchor"],
-    unlock: { requires: [], flags: [], nodes: [] },
-    entry: ["Switchboard reroutes your signal through the safer mesh and reminds you who is watching."],
-  },
-  {
-    id: "open_mesh",
-    name: "Exchange Span",
-    nodes: [
-      "public.exchange",
-      "weaver.den",
-      "monument.beacon",
-      "pier.gate",
-      "ember.pier",
-      "sable.gate",
-      "relay.uplink",
-      "mirror.gate",
-    ],
-    unlock: {
-      requires: ["intro_mesh"],
-      flags: ["tutorial_training_done"],
-      nodes: ["training.node"],
-    },
-    entry: [
-      "Vendors and watchers share a spine here.",
-      "Every route pretends to be casual until you breach the wrong vault.",
-    ],
-  },
-  {
-    id: "core_spine",
-    name: "Core Spine",
-    nodes: [
-      "archives.arc",
-      "lattice.cache",
-      "corp.audit",
-      "core.relic",
-      "rogue.core",
-      "glitch.cache",
-      "slipper.hole",
-      "victory.hall",
-      "echo.after",
-    ],
-    unlock: {
-      requires: ["open_mesh"],
-      flagsAny: ["sniffer_run", "lattice_sigil", "glitch_chant_known"],
-      nodes: ["weaver.den", "lattice.cache"],
-    },
-    entry: [
-      "The spine hums louder than the exchange.",
-      "Security notices every echo; answer with purpose or be routed back to dust.",
-    ],
-  },
-  {
-    id: "cinder_depth",
-    name: "Cinder Depth",
-    nodes: ["deep.slate", "trench.node", "cinder.core"],
-    unlock: {
-      requires: ["core_spine"],
-      flagsAny: ["glitch_phrase_ready", "mantle_phrase", "chat_cinder_ready"],
-      nodes: ["trench.node"],
-    },
-    entry: [
-      "Heat rolls upward from the depth.",
-      "The mantle waits for anyone willing to stitch chants to molten checksum.",
-    ],
-  },
-];
 const CHK_TEMPLATE_CODE = [
   "// @sec FULLSEC",
   "const primer = ctx.read('primer.dat') || '';",
@@ -389,7 +317,6 @@ const NON_DIRTY_COMMANDS = new Set([
   "jobs",
   "diagnose",
   "trust",
-  "regions",
 ]);
 
 function setCorruption(enabled) {
@@ -2836,7 +2763,6 @@ const state = {
     queue: [],
   },
   trust: { level: 2, heat: 0, lastScanAt: 0 },
-  region: { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() },
 };
 
 // RegionManager tracks named network zones (regions), which nodes they contain,
@@ -7278,12 +7204,6 @@ function getSaveData() {
     lastCipher: state.lastCipher,
     localSync: state.localSync,
     trust: state.trust,
-    region: {
-      current: state.region && state.region.current ? state.region.current : null,
-      unlocked: Array.from((state.region && state.region.unlocked) || []),
-      visited: Array.from((state.region && state.region.visited) || []),
-      pending: Array.from((state.region && state.region.pending) || []),
-    },
   };
 }
 
@@ -7386,15 +7306,6 @@ function loadState(options) {
           lastScanAt: Number(data.trust.lastScanAt) || 0,
         }
       : { level: 2, heat: 0, lastScanAt: 0 };
-  state.region =
-    data.region && typeof data.region === "object"
-      ? {
-          current: data.region.current || null,
-          unlocked: new Set(data.region.unlocked || []),
-          visited: new Set(data.region.visited || []),
-          pending: new Set(data.region.pending || []),
-        }
-      : state.region || { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() };
   if (data.chat) {
     state.chat.channel = data.chat.channel || "#kernel";
     state.chat.channels = new Set(data.chat.channels || ["#kernel"]);
@@ -7412,7 +7323,6 @@ function loadState(options) {
   state.unlocked.add("island.grid");
   state.discovered.add("trust.anchor");
   state.unlocked.add("trust.anchor");
-  RegionManager.bootstrap({ silent: true });
   // scratchpad is user-authored; don't clear on load
   if (!opts.silent) writeLine("State loaded.", "ok");
   ensureDriveBackfill({ silent: true });
