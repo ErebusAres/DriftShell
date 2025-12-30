@@ -272,6 +272,23 @@ function hex3(n) {
   return v.toString(16).toUpperCase().padStart(3, "0");
 }
 
+// Intro island teachable moment: a one-time, in-world nudge that heat is noise,
+// trace is response, trust is memory. Fires only once per save when heat rises.
+function maybeTeachSecurityMoment(delta) {
+  // Only during the intro island region and only once.
+  if (state.flags.has("security_taught")) return;
+  if (state.region && state.region.current && state.region.current !== "introNet") return;
+  if (trustHeat() + delta <= 0 && state.trace <= 0) return;
+
+  state.flags.add("security_taught");
+  chatPost({
+    channel: "#kernel",
+    from: "watcher",
+    body: "noise rises; watchers stir. heat is noise, trace is response, trust remembers.",
+  });
+  // No punishment; natural decay will cool heat. This keeps the moment gentle.
+}
+
 function trustLevel() {
   if (!state.trust || typeof state.trust !== "object") return TRUST_MIN_LEVEL;
   return Math.max(TRUST_MIN_LEVEL, Math.min(TRUST_MAX_LEVEL, Number(state.trust.level) || TRUST_MIN_LEVEL));
@@ -294,6 +311,7 @@ function trustAdjustHeat(delta, reason) {
   if (!state.trust || typeof state.trust !== "object") state.trust = { level: 2, heat: 0, lastScanAt: 0 };
   const next = Math.max(0, trustHeat() + delta);
   state.trust.heat = next;
+  maybeTeachSecurityMoment(delta);
   const added = discover(["trust.anchor"]);
   if (added.length) {
     chatPost({
