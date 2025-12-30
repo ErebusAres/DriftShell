@@ -3083,7 +3083,7 @@ const LOCS = {
           "If the Drift can make you do that, it can make you do worse.",
         ].join("\n"),
       },
-      "coolant.upg": {
+      "upg.coolant": {
         type: "upgrade",
         item: "upg.coolant",
         content: [
@@ -3302,7 +3302,7 @@ const LOCS = {
         cipher: true,
         content: "QkVBQ09OOiBTTElQUEVSIElOIFRIRSBEUklGVA==",
       },
-      "coolant.upg": {
+      "upg.coolant": {
         type: "upgrade",
         item: "upg.coolant",
         content: [
@@ -3343,7 +3343,7 @@ const LOCS = {
           "If you missed something, it will keep humming until you return.",
         ].join("\n"),
       },
-      "spool.upg": {
+      "upg.trace_spool": {
         type: "upgrade",
         item: "upg.trace_spool",
         content: ["UPGRADE: TRACE_SPOOL", "Coils that widen your trace budget."].join(
