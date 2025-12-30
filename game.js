@@ -352,6 +352,7 @@ function setCorruptionLevel(level) {
 
 function markDirty() {
   saveDirty = true;
+  if (typeof RegionManager !== "undefined") RegionManager.bootstrap({ silent: true });
   scheduleAutosave();
 }
 
@@ -2411,6 +2412,12 @@ const HELP_DEFS = [
     usage: ["diagnose"],
   },
   {
+    name: "regions",
+    summary: "List network regions, unlock cues, and member nodes.",
+    usage: ["regions"],
+    notes: ["Regions gate visibility, not mechanics; fulfill narrative cues to open them."],
+  },
+  {
     name: "download",
     summary: "Queue file downloads from the current loc.",
     usage: ["download <file|glob>"],
@@ -2757,6 +2764,194 @@ const state = {
   },
   trust: { level: 2, heat: 0, lastScanAt: 0 },
 };
+
+// RegionManager tracks named network zones (regions), which nodes they contain,
+// and the player's narrative progression between them. It does not change core mechanics;
+// it layers story/state on top of existing loc discovery/locks and provides hooks for future puzzles.
+const RegionManager = (() => {
+  const regionById = new Map(REGION_DEFS.map((def) => [def.id, def]));
+  const nodeIndex = new Map();
+  REGION_DEFS.forEach((def) => def.nodes.forEach((node) => nodeIndex.set(node, def.id)));
+
+  function ensureState() {
+    if (!state.region || typeof state.region !== "object") {
+      state.region = { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() };
+    }
+    if (!(state.region.unlocked instanceof Set)) state.region.unlocked = new Set(state.region.unlocked || []);
+    if (!(state.region.visited instanceof Set)) state.region.visited = new Set(state.region.visited || []);
+    if (!(state.region.pending instanceof Set)) state.region.pending = new Set(state.region.pending || []);
+  }
+
+  function getDef(regionId) {
+    return regionById.get(regionId) || null;
+  }
+
+  function regionForNode(node) {
+    return nodeIndex.get(node) || null;
+  }
+
+  function unlockRequirementsMet(def) {
+    const unlock = def.unlock || {};
+    const requires = Array.isArray(unlock.requires) ? unlock.requires : [];
+    const nodes = Array.isArray(unlock.nodes) ? unlock.nodes : [];
+    const flags = Array.isArray(unlock.flags) ? unlock.flags : [];
+    const flagsAny = Array.isArray(unlock.flagsAny) ? unlock.flagsAny : [];
+    const regionsOk = requires.every((id) => state.region.unlocked.has(id));
+    const nodesOk = !nodes.length || nodes.some((node) => state.unlocked.has(node) || state.discovered.has(node));
+    const flagsOk = flags.every((flag) => state.flags.has(flag));
+    const flagsAnyOk = !flagsAny.length || flagsAny.some((flag) => state.flags.has(flag));
+    return regionsOk && nodesOk && flagsOk && flagsAnyOk;
+  }
+
+  // Ensure older saves auto-unlock regions whose nodes are already known/unlocked.
+  function legacyUnlock(def) {
+    return (
+      state.flags.has("region_legacy_backfill") &&
+      def.nodes.some((node) => state.unlocked.has(node) || state.discovered.has(node))
+    );
+  }
+
+  function unlockRegion(regionId, { silent } = {}) {
+    ensureState();
+    if (state.region.unlocked.has(regionId)) return false;
+    const def = getDef(regionId);
+    if (!def) return false;
+    if (!unlockRequirementsMet(def) && !legacyUnlock(def)) return false;
+    state.region.unlocked.add(regionId);
+    def.nodes.forEach((node) => state.region.pending.delete(node));
+    markDirty();
+    if (!silent) {
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: `[region] ${def.name} routes open. Nodes now answer softly.`,
+      });
+    }
+    return true;
+  }
+
+  function syncUnlocks({ silent } = {}) {
+    ensureState();
+    REGION_DEFS.forEach((def) => {
+      if (def.unlock && def.unlock.requires && def.unlock.requires.length === 0 && def.unlock.flags?.length === 0) {
+        unlockRegion(def.id, { silent: true });
+      }
+      unlockRegion(def.id, { silent });
+    });
+  }
+
+  function bootstrap({ silent } = {}) {
+    ensureState();
+    syncUnlocks({ silent });
+    if (!state.region.current && state.region.unlocked.size) {
+      state.region.current = Array.from(state.region.unlocked)[0];
+    }
+  }
+
+  function noteDiscovery(node) {
+    ensureState();
+    const regionId = regionForNode(node);
+    if (!regionId) return;
+    if (!state.region.unlocked.has(regionId)) state.region.pending.add(node);
+  }
+
+  function isNodeVisible(node) {
+    const regionId = regionForNode(node);
+    if (!regionId) return true;
+    ensureState();
+    return state.region.unlocked.has(regionId);
+  }
+
+  function canAccessNode(node) {
+    const regionId = regionForNode(node);
+    if (!regionId) return { ok: true };
+    ensureState();
+    if (state.region.unlocked.has(regionId)) return { ok: true };
+    const def = getDef(regionId);
+    const unlock = def && def.unlock ? def.unlock : {};
+    const needs = [];
+    const requires = Array.isArray(unlock.requires) ? unlock.requires : [];
+    const nodes = Array.isArray(unlock.nodes) ? unlock.nodes : [];
+    const flags = Array.isArray(unlock.flags) ? unlock.flags : [];
+    const flagsAny = Array.isArray(unlock.flagsAny) ? unlock.flagsAny : [];
+    if (requires.length) needs.push("regions: " + requires.join(", "));
+    if (flags.length) needs.push("signals: " + flags.join(", "));
+    if (flagsAny.length) needs.push("any signal: " + flagsAny.join(", "));
+    if (nodes.length) needs.push("story nodes: " + nodes.join(", "));
+    return {
+      ok: false,
+      regionId,
+      hint: needs.length ? needs.join(" | ") : "route sealed",
+      name: def ? def.name : regionId,
+    };
+  }
+
+  function emitRegionEntry(regionId) {
+    ensureState();
+    const def = getDef(regionId);
+    if (!def || state.region.visited.has(regionId)) return;
+    state.region.visited.add(regionId);
+    const lines = Array.isArray(def.entry) ? def.entry : [String(def.entry || def.name)];
+    lines.forEach((line) =>
+      chatPost({
+        channel: "#kernel",
+        from: "sys",
+        body: `[region:${def.id}] ${line}`,
+      })
+    );
+    onRegionEnter(def);
+    markDirty();
+  }
+
+  function enterRegionByNode(node) {
+    ensureState();
+    const regionId = regionForNode(node);
+    if (!regionId) return;
+    if (!state.region.unlocked.has(regionId)) {
+      // Enter attempts can still unlock the region if conditions were just met.
+      if (!unlockRegion(regionId, { silent: false })) return;
+    }
+    state.region.current = regionId;
+    emitRegionEntry(regionId);
+  }
+
+  function describeRegions() {
+    ensureState();
+    writeLine("REGIONS", "header");
+    REGION_DEFS.forEach((def) => {
+      const open = state.region.unlocked.has(def.id) ? "[OPEN]" : "[LOCKED]";
+      const visit = state.region.visited.has(def.id) ? "visited" : "unvisited";
+      writeLine(`${open} ${def.name} (${visit})`, open === "[OPEN]" ? "ok" : "dim");
+      writeLine("  nodes: " + def.nodes.join(", "), "dim");
+      if (!state.region.unlocked.has(def.id)) {
+        const need = canAccessNode(def.nodes[0] || "")?.hint;
+        if (need) writeLine("  needs: " + need, "dim");
+      }
+    });
+  }
+
+  return {
+    ensureState,
+    syncUnlocks,
+    bootstrap,
+    regionForNode,
+    isNodeVisible,
+    canAccessNode,
+    enterRegionByNode,
+    noteDiscovery,
+    describeRegions,
+  };
+})();
+
+// Stub hook for future puzzle injections when a region is first entered.
+function onRegionEnter(region) {
+  // Example: drop a region-specific lock modifier or spawn timed events.
+  // Keep side effects minimal to avoid altering base mechanics.
+  return region;
+}
+
+// Initialize region progression at boot so regions with no requirements open immediately.
+RegionManager.bootstrap({ silent: true });
 
 const MARKS = [
   { id: "mark.scan", text: "Run scripts.trust.scan" },
@@ -4010,11 +4205,13 @@ function getLoc(name) {
 function discover(locs) {
   const newly = [];
   locs.forEach((loc) => {
+    RegionManager.noteDiscovery(loc);
     if (!state.discovered.has(loc)) {
       state.discovered.add(loc);
       newly.push(loc);
     }
   });
+  RegionManager.bootstrap({ silent: true });
   return newly;
 }
 
@@ -4048,6 +4245,7 @@ function listLocs() {
   Array.from(state.discovered)
     .sort()
     .forEach((locName) => {
+      if (!RegionManager.isNodeVisible(locName)) return;
       const node = getLoc(locName);
       const unlocked = state.unlocked.has(locName) ? "OPEN" : "LOCKED";
       const title = node ? node.title : "UNKNOWN";
@@ -6392,6 +6590,7 @@ function updateHud() {
 
 function storyChatTick() {
   if (!state.handle) return;
+  RegionManager.bootstrap({ silent: true });
   if (state.loc === "home.hub" && !state.flags.has("chat_intro")) {
     state.flags.add("chat_intro");
     chatPost({
@@ -6610,6 +6809,12 @@ function startBreach(locName) {
     writeLine("Loc not found.", "error");
     return;
   }
+  RegionManager.bootstrap({ silent: true });
+  const regionGate = RegionManager.canAccessNode(locName);
+  if (!regionGate.ok) {
+    writeLine(`Region sealed: ${regionGate.name} (${regionGate.hint || "route cooling"})`, "warn");
+    return;
+  }
   if (!state.discovered.has(locName)) {
     writeLine("Loc not discovered.", "warn");
     return;
@@ -6750,6 +6955,12 @@ function connectLoc(locName) {
     writeLine("Loc not found.", "error");
     return;
   }
+  RegionManager.bootstrap({ silent: true });
+  const regionGate = RegionManager.canAccessNode(locName);
+  if (!regionGate.ok) {
+    writeLine(`Region sealed: ${regionGate.name} (${regionGate.hint || "route cooling"})`, "warn");
+    return;
+  }
   if (!requirementsMet(locName)) {
     writeLine("Requirements not met for this loc.", "warn");
     const req = loc.requirements || {};
@@ -6779,6 +6990,7 @@ function connectLoc(locName) {
 
   state.loc = locName;
   showLoc();
+  RegionManager.enterRegionByNode(locName);
   if (!state.flags.has("seen_" + locName)) {
     state.flags.add("seen_" + locName);
     if (locName === "monument.beacon") {
@@ -7014,6 +7226,7 @@ function loadState(options) {
   }
   const parsed = JSON.parse(raw);
   const data = parsed && parsed.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  const hasRegionData = !!(data.region && typeof data.region === "object");
   state.handle = data.handle;
   state.loc = data.loc || "home.hub";
   state.gc = data.gc ?? 0;
@@ -7032,6 +7245,7 @@ function loadState(options) {
   state.userScripts = data.userScripts || {};
   state.uploads = data.uploads && typeof data.uploads === "object" ? data.uploads : {};
   state.flags = new Set(data.flags || []);
+  if (!hasRegionData) state.flags.add("region_legacy_backfill");
   state.marks = new Set(data.marks || []);
   state.upgrades = new Set(data.upgrades || []);
   state.driveMax = Math.min(
@@ -7114,6 +7328,7 @@ function loadState(options) {
   ensureDriveBackfill({ silent: true });
   applyCorruptionClasses();
   showLoc();
+  RegionManager.enterRegionByNode(state.loc);
   storyChatTick();
   tutorialAdvance();
   ensureSiphonLoop();
@@ -7250,6 +7465,18 @@ function turnIn(what) {
 
 function diagnoseProgress() {
   writeLine("DIAGNOSE", "header");
+  RegionManager.bootstrap({ silent: true });
+  const lockedRegions = REGION_DEFS.filter((def) => !state.region.unlocked.has(def.id));
+  if (lockedRegions.length) {
+    writeLine("Regions:", "header");
+    lockedRegions.forEach((def) => {
+      const gate = RegionManager.canAccessNode(def.nodes[0] || "") || {};
+      writeLine(`${def.name} [LOCKED]`, "warn");
+      if (gate.hint) writeLine("  gate: " + gate.hint, "dim");
+    });
+  } else {
+    writeLine("All regions open.", "dim");
+  }
   const discovered = Array.from(state.discovered).sort();
   const locked = discovered.filter((l) => !state.unlocked.has(l));
   if (!locked.length) {
@@ -7430,7 +7657,9 @@ function handleCommand(inputText) {
     writeLine(`HANDLE SET: ${state.handle}`, "ok");
     chatPost({ channel: state.chat.channel, from: "sys", body: `*** ${state.handle} connected`, kind: "system" });
     loadScratchFromStorage();
+    RegionManager.bootstrap({ silent: true });
     showLoc();
+    RegionManager.enterRegionByNode(state.loc);
     storyChatTick();
     tutorialPrint();
     updateHud();
@@ -7675,6 +7904,9 @@ function handleCommand(inputText) {
       break;
     case "diagnose":
       diagnoseProgress();
+      break;
+    case "regions":
+      RegionManager.describeRegions();
       break;
     case "store":
       listStore();
