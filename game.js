@@ -964,11 +964,28 @@ async function syncLocalFolder() {
         if (changed) scratchUpdated = true;
         continue;
       }
+      const file = await entry.getFile();
+      updateLocalFileMeta(name, file);
+      const mirror = parseMirrorDownloadName(name);
+      if (mirror && state.drive && state.drive[driveId(mirror.loc, mirror.file)]) {
+        const nextContent = await file.text();
+        const driveIdKey = driveId(mirror.loc, mirror.file);
+        const driveEntry = state.drive[driveIdKey];
+        if (driveEntry.type === "script" && driveEntry.script && driveEntry.script.name && state.kit) {
+          state.kit[driveEntry.script.name] = {
+            owner: "kit",
+            name: driveEntry.script.name,
+            sec: driveEntry.script && driveEntry.script.sec ? driveEntry.script.sec : "FULLSEC",
+            code: nextContent,
+          };
+        }
+        updateDriveContent(driveIdKey, nextContent);
+        updated += 1;
+        continue;
+      }
       if (!lower.endsWith(".s")) continue;
       const scriptName = localScriptNameFromFile(name);
       if (!scriptName) continue;
-      const file = await entry.getFile();
-      updateLocalFileMeta(name, file);
       const text = await file.text();
       seen += 1;
 
@@ -994,6 +1011,10 @@ async function syncLocalFolder() {
   }
 
   if (!seen) {
+    if (updated) {
+      writeLine(`Local sync complete: ${updated} updated.`, "ok");
+      return;
+    }
     if (scratchUpdated) {
       writeLine("Local sync complete: scratch updated.", "ok");
     } else {
@@ -1024,6 +1045,29 @@ function localMirrorFileName(locName, fileName) {
   return loc && file ? `${loc}.${file}` : file || "download.txt";
 }
 
+function parseMirrorDownloadName(name) {
+  const fileName = String(name || "").trim();
+  if (!fileName) return null;
+  const locs = Object.keys(LOCS || {}).sort((a, b) => b.length - a.length);
+  const match = locs.find((loc) => fileName.startsWith(loc + "."));
+  if (!match) return null;
+  const rest = fileName.slice(match.length + 1);
+  if (!rest) return null;
+  return { loc: match, file: rest };
+}
+
+function removeDownloadedEntry(locName, fileName) {
+  const id = driveId(locName, fileName);
+  const entry = state.drive && state.drive[id] ? state.drive[id] : null;
+  if (!entry) return false;
+  delete state.drive[id];
+  if (entry.type === "script" && entry.script && entry.script.name && state.kit) {
+    delete state.kit[entry.script.name];
+  }
+  markDirty();
+  return true;
+}
+
 async function mirrorDownloadToLocalFolder(locName, fileName, entry) {
   if (!shouldMirrorLocal()) return;
   if (!localFolderHandle) {
@@ -1039,12 +1083,14 @@ async function mirrorDownloadToLocalFolder(locName, fileName, entry) {
 
   let content = "";
   if (entry.type === "script") content = String((entry.script && entry.script.code) || "");
-  else if (entry.type === "text") content = String(entry.content || "");
-  else return;
+  else if (entry.type === "text" || entry.type === "item" || entry.type === "upgrade") {
+    content = String(entry.content || "");
+  } else return;
 
   const targetName = localMirrorFileName(locName, fileName);
   try {
     await writeLocalMirrorFile(targetName, content);
+    localFileMeta.set(targetName, { lastModified: Date.now(), size: content.length });
   } catch (err) {
     writeLine("Local mirror failed: " + (err && err.message ? err.message : "error"), "warn");
   }
@@ -1140,13 +1186,13 @@ async function pollLocalFolderChanges() {
 
   let scriptUpdates = 0;
   let scratchUpdated = false;
+  const seen = new Set();
   for await (const entry of localFolderHandle.values()) {
     if (!entry || entry.kind !== "file") continue;
     const name = String(entry.name || "");
     const lower = name.toLowerCase();
     const isScratch = lower === LOCAL_SCRATCH_FILE;
-    const isScript = lower.endsWith(".s");
-    if (!isScratch && !isScript) continue;
+    seen.add(name);
 
     const file = await entry.getFile();
     const prior = localFileMeta.get(name);
@@ -1161,6 +1207,25 @@ async function pollLocalFolderChanges() {
 
     const text = await file.text();
     updateLocalFileMeta(name, file);
+    const mirror = parseMirrorDownloadName(name);
+    if (mirror && state.drive && state.drive[driveId(mirror.loc, mirror.file)]) {
+      const driveIdKey = driveId(mirror.loc, mirror.file);
+      const driveEntry = state.drive[driveIdKey];
+      const nextContent = String(text || "");
+      if (driveEntry.type === "script" && driveEntry.script && driveEntry.script.name && state.kit) {
+        state.kit[driveEntry.script.name] = {
+          owner: "kit",
+          name: driveEntry.script.name,
+          sec: driveEntry.script && driveEntry.script.sec ? driveEntry.script.sec : "FULLSEC",
+          code: nextContent,
+        };
+      }
+      updateDriveContent(driveIdKey, nextContent);
+      scriptUpdates += 1;
+      continue;
+    }
+    const isScript = lower.endsWith(".s");
+    if (!isScript) continue;
     const scriptName = localScriptNameFromFile(name);
     if (!scriptName) continue;
     if (!state.handle) continue;
@@ -1177,6 +1242,19 @@ async function pollLocalFolderChanges() {
       else storeDriveCopy("local", driveName, meta);
       scriptUpdates += 1;
     }
+  }
+
+  if (localFileMeta.size) {
+    Array.from(localFileMeta.keys()).forEach((key) => {
+      if (seen.has(key)) return;
+      const mirror = parseMirrorDownloadName(key);
+      if (!mirror) return;
+      const removed = removeDownloadedEntry(mirror.loc, mirror.file);
+      if (removed) {
+        localFileMeta.delete(key);
+        scriptUpdates += 1;
+      }
+    });
   }
 
   if (localScratchPending && Date.now() - localScratchLastLocalEdit >= 1200) {
@@ -1281,23 +1359,30 @@ function renderChat() {
     if (channel.startsWith("@")) {
       const dir = document.createElement("span");
       dir.className = "chat-dm-dir dim";
-      dir.textContent = m.from === state.handle ? ">>" : "<<";
+      const isOutgoing = m.from === state.handle;
+      dir.textContent = isOutgoing ? ">>" : "<<";
       body.appendChild(dir);
       body.appendChild(document.createTextNode(" "));
 
-      const tag = document.createElement("span");
-      tag.className = "chat-dm-tag tok magenta";
-      tag.textContent = channel;
-      body.appendChild(tag);
+      const label = document.createElement("span");
+      label.className = "chat-dm-tag tok magenta";
+      label.textContent = isOutgoing ? "@to" : "@from";
+      body.appendChild(label);
       body.appendChild(document.createTextNode(" "));
-    }
 
-    const nameSpan = document.createElement("span");
-    nameSpan.className =
-      "chat-name " + (m.kind === "system" ? "dim" : colorClass);
-    nameSpan.textContent = m.kind === "system" ? "sys" : m.from;
-    body.appendChild(nameSpan);
-    body.appendChild(document.createTextNode(" :: "));
+      const who = document.createElement("span");
+      who.className = "chat-dm-tag tok magenta";
+      who.textContent = isOutgoing ? channel : "@" + (m.kind === "system" ? "sys" : m.from);
+      body.appendChild(who);
+      body.appendChild(document.createTextNode(" :: "));
+    } else {
+      const nameSpan = document.createElement("span");
+      nameSpan.className =
+        "chat-name " + (m.kind === "system" ? "dim" : colorClass);
+      nameSpan.textContent = m.kind === "system" ? "sys" : m.from;
+      body.appendChild(nameSpan);
+      body.appendChild(document.createTextNode(" :: "));
+    }
     const msgSpan = document.createElement("span");
     renderTerminalRich(msgSpan, String(m.body));
     body.appendChild(msgSpan);
@@ -2128,12 +2213,13 @@ const HELP_DEFS = [
     name: "del",
     summary: "Delete drive files or your local scripts.",
     usage: [
-      "del drive:<loc>/<file> | del <loc>:<file> | del <loc>/<file> | del <your_handle>.<script> --confirm",
+      "del drive:<loc>/<file> | del <loc>:<file> | del <loc>/<file> | del local/<file> | del <your_handle>.<script> --confirm",
     ],
     examples: [
       "del relay.uplink:patch.s",
       "del relay.uplink/patch.s",
       "del public.exchange/*.log",
+      "del local/*.s",
       "del <your_handle>.chk --confirm",
     ],
   },
@@ -2745,6 +2831,7 @@ const LOCS = {
           sec: "FULLSEC",
           code: [
              "// @sec FULLSEC",
+             "if (ctx.flagged('trace_open')) { ctx.print('Tracer already mapped the edge.'); return; }",
              "ctx.print('Tracer online. Mesh resolving...');",
              "ctx.flag('trace_open');",
              "ctx.discover(['archives.arc','pier.gate','relay.uplink']);",
@@ -3965,7 +4052,7 @@ function ensureDriveBackfill({ silent } = {}) {
   if (added) markDirty();
 }
 
-function delCommand(args) {
+async function delCommand(args) {
   const a = args || [];
   const target = String(a[0] || "").trim();
   if (!target) {
@@ -3973,6 +4060,53 @@ function delCommand(args) {
       "Usage: del drive:<loc>/<file> | del <loc>:<file> | del <loc>/<file> | del <your_handle>.<script> [--confirm]",
       "warn"
     );
+    return;
+  }
+
+  // Local sync folder deletes (local/file or local:filename).
+  if (/^local[:/]/i.test(target)) {
+    if (!localFolderGuard()) return;
+    if (!localFolderHandle) {
+      writeLine("Local folder not set. Run: folder pick", "warn");
+      return;
+    }
+    const perm = await ensureLocalFolderPermission(true);
+    if (!perm.ok) {
+      writeLine("Local folder permission denied.", "warn");
+      return;
+    }
+    const raw = target.replace(/^local[:/]/i, "");
+    const isGlob = raw.includes("*") || raw.includes("?");
+    const re = isGlob ? globToRegex(raw) : null;
+    const removed = [];
+    const matches = [];
+    for await (const entry of localFolderHandle.values()) {
+      if (!entry || entry.kind !== "file") continue;
+      const name = String(entry.name || "");
+      if (isGlob) {
+        if (re.test(name)) matches.push(name);
+        continue;
+      }
+      if (name === raw) matches.push(name);
+      else if (name.toLowerCase().endsWith("." + raw.toLowerCase())) matches.push(name);
+    }
+    const targets = isGlob ? matches : matches.length === 1 ? matches : matches.filter((n) => n === raw);
+    for (const name of targets) {
+      try {
+        await localFolderHandle.removeEntry(name);
+        removed.push(name);
+        const mirror = parseMirrorDownloadName(name);
+        if (mirror) {
+          removeDownloadedEntry(mirror.loc, mirror.file);
+        }
+        localFileMeta.delete(name);
+      } catch {}
+    }
+    if (removed.length) {
+      writeLine(`deleted ${removed.length} local file(s)`, "ok");
+      return;
+    }
+    writeLine("Local file not found.", "warn");
     return;
   }
 
