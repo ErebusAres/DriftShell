@@ -1606,7 +1606,7 @@ async function pollLocalFolderChanges() {
 function writeLine(text, kind) {
   const line = document.createElement("div");
   line.className = `line${kind ? " " + kind : ""}`;
-  renderTerminalRich(line, String(text));
+  renderTerminalRich(line, applyEscalationTextEffects(String(text)));
   screen.appendChild(line);
   screen.scrollTop = screen.scrollHeight;
 }
