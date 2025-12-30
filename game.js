@@ -3542,6 +3542,62 @@ const LOCS = {
           "}",
         ].join("\n"),
       },
+      // Early behavioral fork (profit): fast GC with heat + watcher pressure. Safe stumble, no lockouts.
+      "flash.s": {
+        type: "script",
+        script: {
+          name: "flash",
+          sec: "MIDSEC",
+          code: [
+            "// @sec MIDSEC",
+            "const fast = ctx.flagged('flash_fast');",
+            "const rewarded = ctx.flagged('flash_paid');",
+            "const gc = rewarded ? 12 : 25;",
+            "// Profit path: quick GC with heat + watcher attention. Safe stumble, not a lock.",
+            "ctx.gc(gc);",
+            "ctx.print(`GC +${gc}`);",
+            "ctx.flag('flash_paid');",
+            "ctx.adjustHeat(2, 'flash deal');",
+            "ctx.behavior('aggressive');",
+            "ctx.behavior('noise');",
+            "if (fast) { ctx.traceBump('flash repeat'); ctx.print('watchers narrow eyes'); }",
+            "ctx.flag('flash_fast');",
+          ].join("\n"),
+        },
+        content: [
+          "/* flash.s */",
+          "function main(ctx,args){",
+          "  // Quick scrap flip. Pays out fast, but the signal runs hot.",
+          "}",
+        ].join("\n"),
+      },
+      // Early behavioral fork (observation): patience yields tone/lore instead of GC; heat stays low.
+      "listen.s": {
+        type: "script",
+        script: {
+          name: "listen",
+          sec: "LOWSEC",
+          code: [
+            "// @sec LOWSEC",
+            "const calm = ctx.lastWaitMs && ctx.lastWaitMs() > 2500;",
+            "const first = !ctx.flagged('listen_once');",
+            "// Observation path: slower, lower heat, reveals tone instead of GC.",
+            "if (calm) ctx.coolHeat(1, 'listen');",
+            "ctx.behavior('patient');",
+            "ctx.behavior('careful');",
+            "ctx.flag('listen_once');",
+            "ctx.print(calm ? 'static thins; a quiet log surfaces.' : 'static steady; hold longer to hear more.');",
+            "if (first) ctx.post('#kernel','watcher','stillness logged; some routes stay loose when you linger.');",
+            "if (ctx.corruptionLevel() >= 2 && calm) ctx.print('█ree-line hum traced across the mesh.');",
+          ].join("\n"),
+        },
+        content: [
+          "/* listen.s */",
+          "function main(ctx,args){",
+          "  // Stand still, let the mesh talk back.",
+          "}",
+        ].join("\n"),
+      },
       "sniffer.s": {
         type: "script",
         script: {
@@ -7121,6 +7177,25 @@ function buildContext(currentScript, outputKind) {
     hasItem: (item) => state.inventory.has(item),
     call: (scriptName, scriptArgs) => runScript(scriptName, scriptArgs, currentScript),
     loc: () => state.loc,
+    gc: (amount) => {
+      const n = Math.max(0, Number(amount) || 0);
+      state.gc = Math.max(0, Math.floor((Number(state.gc) || 0) + n));
+      markDirty();
+    },
+    adjustHeat: (delta, reason) => trustAdjustHeat(Number(delta) || 0, reason || "script"),
+    coolHeat: (amount, reason) => trustCoolDown(Math.max(0, Number(amount) || 0), reason || "script"),
+    behavior: (kind) => {
+      recordBehavior(kind);
+      if (kind === "noise" || kind === "aggressive") recordRogueBehavior("noise");
+      if (kind === "careful") recordRogueBehavior("careful");
+    },
+    traceBump: (reason) => profiledTraceRise(1, reason || "script"),
+    corruptionLevel: () => corruptionLevel(),
+    lastWaitMs: () => {
+      if (!state.wait || typeof state.wait.lastAt !== "number") return null;
+      return Date.now() - state.wait.lastAt;
+    },
+    post: (channel, from, body) => chatPost({ channel: channel || "#kernel", from: from || "watcher", body: body || "" }),
   };
 }
 
