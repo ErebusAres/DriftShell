@@ -6654,7 +6654,7 @@ function validateGlitchChant() {
   } else {
     // Near-miss: subtle corruption and slight heat bump (trace when very close), no explicit “wrong”.
     if (attempt && haveAll) {
-      writeLine(applyEscalationTextEffects("chant scatters in the buffer"), "warn");
+      writeLine("chant scatters in the buffer", "warn");
       trustAdjustHeat(1, "chant_miss");
       if (near) state.trace = Math.min(state.traceMax, (state.trace || 0) + 1);
       if (near) watcherTraceReact("chant noise");
@@ -9242,14 +9242,19 @@ function corruptionAllowed(text) {
   // Region gating: only glitch in severe regions or corrupted/glitch content.
   const loc = state.loc || "";
   const region = state.region && state.region.current;
-  const severeRegion = region === "secureCore" || region === "cinderDepth";
+  const allowedRegions = new Set(["secureCore", "cinderDepth"]);
+  const severeRegion = allowedRegions.has(region);
   const corruptedLocs = new Set(["rogue.core", "core.relic", "glitch.cache", "slipper.hole", "deep.slate", "trench.node", "cinder.core"]);
 
   const hasGlyph = String(text || "").includes(GLITCH_GLYPH);
   const looksGlitch = /fragment\.|glitch|rogue|corrupt/i.test(text || "");
 
-  if (hasGlyph || corruptedLocs.has(loc) || (severeRegion && (looksGlitch || loc === "core.relic" || loc === "rogue.core"))) return true;
-  return false;
+  // Only allow corruption when the content is explicitly corrupted OR the region is marked severe.
+  if (corruptedLocs.has(loc)) return true;
+  if (looksGlitch || hasGlyph) return true; // e.g., glitch fragments/logs anywhere.
+  if (severeRegion && (loc === "core.relic" || loc === "rogue.core")) return true;
+  if (severeRegion) return true;
+  return false; // Early regions stay clean.
 }
 
 // Look for user reconstruction attempts of the glitch chant via scratchpad or drive text.
