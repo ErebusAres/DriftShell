@@ -276,6 +276,34 @@ function hex3(n) {
   return v.toString(16).toUpperCase().padStart(3, "0");
 }
 
+function introMemoryState() {
+  if (!state.introMemory || typeof state.introMemory !== "object") {
+    state.introMemory = { pingCount: 0, pingStreak: 0, lastPingAt: 0, heatSpikes: 0, traceNotice: false, patienceNotice: false };
+  }
+  return state.introMemory;
+}
+
+function noteIntroHeatSpike() {
+  const region = state.currentRegion || (state.region && state.region.current);
+  if (region !== "introNet") return;
+  const mem = introMemoryState();
+  mem.heatSpikes = Math.max(0, Number(mem.heatSpikes) || 0) + 1;
+  if (mem.heatSpikes >= 3) state.flags.add("intro_heat_memory"); // Trust as memory: later regions remember early noise.
+}
+
+function introTraceTeach(reason) {
+  const region = state.currentRegion || (state.region && state.region.current);
+  if (region !== "introNet") return;
+  if (state.flags.has("intro_trace_taught")) return;
+  state.flags.add("intro_trace_taught");
+  introMemoryState().traceNotice = true;
+  chatPost({
+    channel: "#kernel",
+    from: "watcher",
+    body: "trace is a hand that moves when you keep pushing; wait and it will unclench.",
+  });
+}
+
 // Intro island teachable moment: a one-time, in-world nudge that heat is noise,
 // trace is response, trust is memory. Fires only once per save when heat rises.
 function maybeTeachSecurityMoment(delta) {
@@ -317,6 +345,7 @@ function trustAdjustHeat(delta, reason) {
   const next = Math.max(0, trustHeat() + delta);
   state.trust.heat = next;
   maybeTeachSecurityMoment(delta);
+  if (delta > 0) noteIntroHeatSpike();
   // Behavioral profiling: if the player keeps spiking heat, quietly shift watcher tone.
   if (delta > 0) behaviorHeatTone(reason);
   if (next > 0) state.storyState?.flags?.add("heat_seen");
@@ -360,6 +389,7 @@ function trustAdjustHeat(delta, reason) {
 
 function trustCoolDown(amount, reason) {
   if (!state.trust || typeof state.trust !== "object") state.trust = { level: 2, heat: 0, lastScanAt: 0 };
+  const priorHeat = trustHeat();
   const next = Math.max(0, trustHeat() - amount);
   state.trust.heat = next;
   if (reason && reason !== "wait") chatSystem(`trust cool (${reason}) -> heat ${next}/${TRUST_HEAT_THRESHOLD}`);
@@ -367,6 +397,12 @@ function trustCoolDown(amount, reason) {
     recordBehavior("patient");
     recordRogueBehavior("careful");
     watcherProfileTick();
+    const region = state.currentRegion || (state.region && state.region.current);
+    if (region === "introNet" && priorHeat > next && !introMemoryState().patienceNotice) {
+      introMemoryState().patienceNotice = true;
+      // Safe failure recovery acknowledgment: patience is felt, not scored.
+      writeLine("stillness gives the grid room to forget.", "dim");
+    }
   }
   markDirty();
   updateHud();
@@ -2923,6 +2959,7 @@ const state = {
   currentRegion: null,
   narrativeHint: null,
   glitchChant: null,
+  introMemory: { pingCount: 0, pingStreak: 0, lastPingAt: 0, heatSpikes: 0, traceNotice: false, patienceNotice: false },
   storyState: {
     current: "island_intro",
     completed: new Set(),
@@ -3130,6 +3167,17 @@ function onRegionEnter(region) {
   // Example extension:
   // if (region.id === "corporateNet") chatPost({ channel: "#kernel", from: "sys", body: "Audit eyes open." });
   // Keep side effects minimal to avoid altering base mechanics.
+  if (state.flags.has("intro_heat_memory") && region && region.id && region.id !== "introNet") {
+    const key = `intro_heat_echo_${region.id}`;
+    if (!state.flags.has(key)) {
+      state.flags.add(key);
+      chatPost({
+        channel: "#kernel",
+        from: "watcher",
+        body: "your early noise rides ahead of you. some routes may tense faster this time.",
+      });
+    }
+  }
   return region;
 }
 
@@ -3319,6 +3367,7 @@ const LOCS = {
           "  5) breach training.node (solve locks)",
           "",
           "Optional: island.echo unlocks after you clear training.node.",
+          "Optional: tap the island beacon with `ping` if you want to hear it breathe.",
         ].join("\n"),
       },
       "grid.jobs": {
@@ -5704,6 +5753,49 @@ function waitTick() {
   }
 }
 
+function pingCommand(args) {
+  const region = state.currentRegion || (state.region && state.region.current);
+  if (region !== "introNet") {
+    writeLine("Ping drifts out; nothing notable answers.", "dim");
+    return;
+  }
+  islandPing(args);
+}
+
+function islandPing(args) {
+  const loc = state.loc || "";
+  // Safe failure: a tempting island-only button that raises heat, teaching risk without lasting punishment.
+  if (loc !== "island.grid" && loc !== "island.echo" && loc !== "home.hub") {
+    writeLine("The island beacon only hears pings nearby.", "dim");
+    return;
+  }
+  const mem = introMemoryState();
+  const now = Date.now();
+  const fast = now - (Number(mem.lastPingAt) || 0) < 2500;
+  mem.lastPingAt = now;
+  mem.pingCount = (Number(mem.pingCount) || 0) + 1;
+  mem.pingStreak = fast ? (Number(mem.pingStreak) || 0) + 1 : 1;
+
+  if (mem.pingCount === 1) writeLine("Beacon answers with a soft tone. Feels harmless.", "dim");
+  else if (fast) writeLine("Beacon heats up; echoes sharpen.", "warn");
+  else writeLine("Beacon hums warmer than before.", "warn");
+
+  // Designed stumble: spamming the beacon is tempting, but it raises heat safely to teach consequences.
+  trustAdjustHeat(1, "island ping");
+
+  if (mem.pingStreak >= 2) {
+    const gained = state.trace < state.traceMax ? 1 : 0;
+    if (gained > 0) {
+      state.trace += gained;
+      introTraceTeach("island ping");
+      watcherTraceReact("island ping");
+      writeLine(`TRACE +${gained} (${state.trace}/${state.traceMax})`, "warn");
+    }
+  }
+  if (mem.pingCount >= 2 && trustHeat() > 0) state.flags.add("intro_heat_memory"); // Trust as memory: later tone reacts.
+  markDirty();
+}
+
 function siphonStatus() {
   writeLine("SIPHON", "header");
   if (!state.upgrades.has("upg.siphon")) {
@@ -6451,6 +6543,7 @@ function profiledTraceRise(base, reason) {
     delta = Math.max(0, delta - 1); // Patient runs get a first-mistake grace.
   }
   state.trace = Math.min(state.traceMax, currentTrace + delta);
+  if (delta > 0) introTraceTeach(reason);
   return delta;
 }
 
@@ -7781,6 +7874,7 @@ function getSaveData() {
     siphon: state.siphon,
     lockoutUntil: state.lockoutUntil,
     wait: state.wait,
+    introMemory: state.introMemory,
     tutorial: {
       enabled: state.tutorial.enabled,
       stepIndex: state.tutorial.stepIndex,
@@ -7900,6 +7994,17 @@ function loadState(options) {
     data.wait && typeof data.wait === "object"
       ? { lastAt: Number(data.wait.lastAt) || 0, streak: Number(data.wait.streak) || 0 }
       : state.wait || { lastAt: 0, streak: 0 };
+  state.introMemory =
+    data.introMemory && typeof data.introMemory === "object"
+      ? {
+          pingCount: Number(data.introMemory.pingCount) || 0,
+          pingStreak: Number(data.introMemory.pingStreak) || 0,
+          lastPingAt: Number(data.introMemory.lastPingAt) || 0,
+          heatSpikes: Number(data.introMemory.heatSpikes) || 0,
+          traceNotice: !!data.introMemory.traceNotice,
+          patienceNotice: !!data.introMemory.patienceNotice,
+        }
+      : state.introMemory || { pingCount: 0, pingStreak: 0, lastPingAt: 0, heatSpikes: 0, traceNotice: false, patienceNotice: false };
   if (data.tutorial) {
     state.tutorial.enabled = data.tutorial.enabled !== false;
     state.tutorial.completed = new Set(data.tutorial.completed || []);
@@ -8623,6 +8728,9 @@ function handleCommand(inputText) {
       break;
     case "siphon":
       siphonCommand(args);
+      break;
+    case "ping":
+      pingCommand(args);
       break;
     case "wait":
       waitTick();
