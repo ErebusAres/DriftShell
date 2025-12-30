@@ -736,6 +736,17 @@ function supportsLocalFolder() {
   return typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
 }
 
+async function localFolderPermissionGranted(writeAccess) {
+  if (!localFolderHandle || !localFolderHandle.queryPermission) return false;
+  const mode = writeAccess ? "readwrite" : "read";
+  try {
+    const perm = await localFolderHandle.queryPermission({ mode });
+    return perm === "granted";
+  } catch {
+    return false;
+  }
+}
+
 function localFolderGuard() {
   if (!supportsLocalFolder()) {
     writeLine("Local folder sync requires a Chromium-based browser (Chrome/Edge/Brave).", "warn");
@@ -883,6 +894,37 @@ async function initLocalFolder() {
   ensureLocalSyncPoll();
 }
 
+async function backfillLocalFolderFromDrive(options) {
+  const opts = options || {};
+  if (!shouldMirrorLocal()) return;
+  if (!supportsLocalFolder() || !window.isSecureContext) return;
+  if (!localFolderHandle) return;
+  const canWrite = opts.prompt
+    ? (await ensureLocalFolderPermission(true)).ok
+    : await localFolderPermissionGranted(true);
+  if (!canWrite) return;
+
+  let added = 0;
+  const entries = Object.values(state.drive || {});
+  for (const entry of entries) {
+    if (!entry || (entry.type !== "script" && entry.type !== "text")) continue;
+    const name = localMirrorFileName(entry.loc, entry.name);
+    let exists = false;
+    try {
+      await localFolderHandle.getFileHandle(name);
+      exists = true;
+    } catch {}
+    if (exists) continue;
+    const content = String(entry.content || "");
+    try {
+      await writeLocalMirrorFile(name, content);
+      localFileMeta.set(name, { lastModified: Date.now(), size: content.length });
+      added += 1;
+    } catch {}
+  }
+  if (!opts.silent && added) writeLine(`Local sync: mirrored ${added} drive file(s).`, "dim");
+}
+
 async function pickLocalFolder() {
   if (!localFolderGuard()) return;
   try {
@@ -971,6 +1013,7 @@ async function syncLocalFolder() {
         const nextContent = await file.text();
         const driveIdKey = driveId(mirror.loc, mirror.file);
         const driveEntry = state.drive[driveIdKey];
+        if (driveEntry.type !== "script" && driveEntry.type !== "text") continue;
         if (driveEntry.type === "script" && driveEntry.script && driveEntry.script.name && state.kit) {
           state.kit[driveEntry.script.name] = {
             owner: "kit",
@@ -1020,10 +1063,12 @@ async function syncLocalFolder() {
     } else {
       writeLine("Local sync complete: no .s files found.", "dim");
     }
+    await backfillLocalFolderFromDrive({ silent: true, prompt: true });
     return;
   }
   const suffix = scratchUpdated ? " (+scratch)" : "";
   writeLine(`Local sync complete: ${added} new, ${updated} updated, ${unchanged} unchanged.${suffix}`, "ok");
+  await backfillLocalFolderFromDrive({ silent: true, prompt: true });
   markDirty();
   updateHud();
 }
@@ -1060,6 +1105,7 @@ function removeDownloadedEntry(locName, fileName) {
   const id = driveId(locName, fileName);
   const entry = state.drive && state.drive[id] ? state.drive[id] : null;
   if (!entry) return false;
+  if (entry.type !== "script" && entry.type !== "text") return false;
   delete state.drive[id];
   if (entry.type === "script" && entry.script && entry.script.name && state.kit) {
     delete state.kit[entry.script.name];
@@ -1083,9 +1129,8 @@ async function mirrorDownloadToLocalFolder(locName, fileName, entry) {
 
   let content = "";
   if (entry.type === "script") content = String((entry.script && entry.script.code) || "");
-  else if (entry.type === "text" || entry.type === "item" || entry.type === "upgrade") {
-    content = String(entry.content || "");
-  } else return;
+  else if (entry.type === "text") content = String(entry.content || "");
+  else return;
 
   const targetName = localMirrorFileName(locName, fileName);
   try {
@@ -1211,6 +1256,7 @@ async function pollLocalFolderChanges() {
     if (mirror && state.drive && state.drive[driveId(mirror.loc, mirror.file)]) {
       const driveIdKey = driveId(mirror.loc, mirror.file);
       const driveEntry = state.drive[driveIdKey];
+      if (driveEntry.type !== "script" && driveEntry.type !== "text") continue;
       const nextContent = String(text || "");
       if (driveEntry.type === "script" && driveEntry.script && driveEntry.script.name && state.kit) {
         state.kit[driveEntry.script.name] = {
@@ -6377,6 +6423,7 @@ function loadState(options) {
   tutorialAdvance();
   ensureSiphonLoop();
   void refreshLocalFolderUi();
+  void backfillLocalFolderFromDrive({ silent: true, prompt: false });
   // If we loaded from legacy key, persist in the new namespace.
   if (localStorage.getItem(SAVE_KEY) === null) localStorage.setItem(SAVE_KEY, JSON.stringify(JSON.parse(raw)));
   saveDirty = false;
