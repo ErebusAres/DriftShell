@@ -2101,8 +2101,15 @@ const HELP_DEFS = [
   {
     name: "del",
     summary: "Delete drive files or your local scripts.",
-    usage: ["del <loc/file> | del drive:<loc>/<file> | del <your_handle>.<script> --confirm"],
-    examples: ["del sable.gate/cipher.txt", "del public.exchange/*.log", "del <your_handle>.chk --confirm"],
+    usage: [
+      "del drive:<loc>/<file> | del <loc>:<file> | del <loc>/<file> | del <your_handle>.<script> --confirm",
+    ],
+    examples: [
+      "del relay.uplink:patch.s",
+      "del relay.uplink/patch.s",
+      "del public.exchange/*.log",
+      "del <your_handle>.chk --confirm",
+    ],
   },
   {
     name: "diagnose",
@@ -3936,8 +3943,36 @@ function delCommand(args) {
   const a = args || [];
   const target = String(a[0] || "").trim();
   if (!target) {
-    writeLine("Usage: del drive:<loc>/<file> | del <your_handle>.<script> [--confirm]", "warn");
+    writeLine(
+      "Usage: del drive:<loc>/<file> | del <loc>:<file> | del <loc>/<file> | del <your_handle>.<script> [--confirm]",
+      "warn"
+    );
     return;
+  }
+
+  // Uploaded files (loc:file or loc/file).
+  if (target.includes(":") || target.includes("/")) {
+    const normalized = target.replace(/^uploads?:/i, "");
+    let locName = null;
+    let fileName = null;
+    if (normalized.includes(":")) {
+      const parts = normalized.split(":", 2);
+      locName = parts[0];
+      fileName = parts[1];
+    } else if (normalized.includes("/")) {
+      const parts = normalized.split("/");
+      locName = parts[0];
+      fileName = parts.slice(1).join("/");
+    }
+    if (locName && fileName && state.uploads && state.uploads[locName] && state.uploads[locName].files) {
+      const bucket = state.uploads[locName].files;
+      if (bucket[fileName]) {
+        delete bucket[fileName];
+        writeLine(`deleted upload ${locName}/${fileName}`, "ok");
+        markDirty();
+        return;
+      }
+    }
   }
 
   // Drive wildcards:
