@@ -89,6 +89,14 @@ const GLITCH_FRAGMENTS = {
   delta: { id: "delta", clue: "STILL", desc: "The reminder to slow down when trace rises." },
 };
 const GLITCH_FRAGMENT_IDS = Object.keys(GLITCH_FRAGMENTS);
+const NARRATIVE_CUES = {
+  island_intro: "Isolated grid hums back. Heat is a rumor; keys are facts.",
+  mesh_explore: "Outer mesh hears you now. Cheap signals, loud watchers.",
+  trust_pressure: "Security eyes narrow. Trust and trace move together.",
+  glitch_arc: "Corrupted caches surface. Fragments want repair, not pity.",
+  rogue_finale: "The rogue listens for a chant and a checksum. Bring both.",
+  cinder_depths: "Depth heat leaks upward. Mantle echoes wait for a patient hand.",
+};
 // Region definitions attach existing locs to narrative zones.
 // To classify a new or existing host, add its loc id to exactly one `nodes` list below.
 // You can extend this list (e.g., add a DLC region) without touching core mechanics.
@@ -2841,6 +2849,7 @@ const state = {
   region: { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() },
   currentRegion: null,
   narrativeHint: null,
+  glitchChant: null,
 };
 
 // RegionManager tracks named network zones (regions), which nodes they contain,
@@ -2903,10 +2912,11 @@ RegionManager = (() => {
     });
     markDirty();
     if (!silent) {
+      const whisper = `route shift: ${def.name} begins to answer (${def.nodes.length} hosts listening)`;
       chatPost({
         channel: "#kernel",
         from: "switchboard",
-        body: `[region] ${def.name} routes open. Nodes now answer softly.`,
+        body: whisper,
       });
     }
     return true;
@@ -6247,12 +6257,13 @@ function triggerNarrativeStepForLoc(locName) {
   if (state.flags.has(key)) return;
   state.flags.add(key);
   const summary = step.summary || "Signal shifts.";
+  const cue = NARRATIVE_CUES[step.id] || NARRATIVE_CUES[step.name] || summary;
   chatPost({
     channel: "#kernel",
     from: "sys",
-    body: `[path] ${step.title || step.name || "route"} :: ${summary}`,
+    body: `[path] ${step.title || step.name || "route"} :: ${cue}`,
   });
-  state.narrativeHint = `${step.title || step.name}: ${summary}`;
+  state.narrativeHint = `${step.title || step.name}: ${cue}`;
   updateHud();
 }
 
@@ -6340,6 +6351,14 @@ function validateGlitchChant() {
   const chant = `${chantWords.beta} THE ${chantWords.gamma} ${chantWords.delta} THREAD`.trim();
 
   if (haveAll && !chant.includes("?")) {
+    if (!state.flags.has("glitch_phrase_ready")) {
+      // Single moment of realization: announce once when the chant is whole.
+      chatPost({
+        channel: "#kernel",
+        from: "weaver",
+        body: `Chant stitched: ${chant}`,
+      });
+    }
     state.flags.add("glitch_phrase_ready");
     state.flags.add("glitch_phrase_clean");
     state.flags.add("glitch_chant_value");
@@ -7000,6 +7019,11 @@ function startBreach(locName) {
       writeLine("rogue.core pulses back a checksum request. Read rogue.seed first.", "warn");
       return;
     }
+    chatPost({
+      channel: "#kernel",
+      from: "archivist",
+      body: "Rogue ritual: trust steady, chant whole, checksum ready. Do not rush the lock stack.",
+    });
   }
   if (!state.discovered.has(locName)) {
     writeLine("Loc not discovered.", "warn");
