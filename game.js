@@ -14,6 +14,7 @@ const BRIEF_SEEN_KEY = `${GAME_ID}_brief_seen_v1`;
 const LOCAL_FOLDER_DB = `${GAME_ID}_local_folder_v1`;
 const LOCAL_FOLDER_STORE = "handles";
 const LOCAL_FOLDER_KEY = "scriptsFolder";
+const LOCAL_SCRATCH_FILE = "scratch.txt";
 const SEC_LEVELS = ["NULLSEC", "LOWSEC", "MIDSEC", "HIGHSEC", "FULLSEC"];
 // Drive capacity is an in-world abstraction of browser localStorage limits.
 // Keep it comfortably below typical per-origin quotas (~5MB).
@@ -165,6 +166,11 @@ let siphonInterval = null;
 let booting = false;
 let bootTimers = [];
 let localFolderHandle = null;
+let localSyncPoll = null;
+let localSyncPollActive = false;
+let localScratchLastLocalEdit = 0;
+let localScratchPending = null;
+const localFileMeta = new Map();
 const AUTOSAVE_MIN_INTERVAL_MS = 15_000;
 const AUTOSAVE_FORCE_INTERVAL_MS = 60_000;
 const NON_DIRTY_COMMANDS = new Set([
@@ -788,6 +794,7 @@ async function refreshLocalFolderUi() {
   } catch {
     setLocalFolderStatus("Local folder status unknown.", "warn");
   }
+  ensureLocalSyncPoll();
 }
 
 function openLocalFolderDb() {
@@ -873,6 +880,7 @@ async function initLocalFolder() {
     }
   } catch {}
   await refreshLocalFolderUi();
+  ensureLocalSyncPoll();
 }
 
 async function pickLocalFolder() {
@@ -884,6 +892,7 @@ async function pickLocalFolder() {
     await ensureLocalFolderPermission(true);
     writeLine("Local folder set.", "ok");
     await refreshLocalFolderUi();
+    ensureLocalSyncPoll();
   } catch (err) {
     if (err && err.name === "AbortError") return;
     writeLine(
@@ -900,6 +909,7 @@ async function forgetLocalFolder() {
   } catch {}
   writeLine("Local folder cleared.", "dim");
   await refreshLocalFolderUi();
+  ensureLocalSyncPoll();
 }
 
 async function reportLocalFolderStatus() {
@@ -943,14 +953,22 @@ async function syncLocalFolder() {
   let added = 0;
   let updated = 0;
   let unchanged = 0;
+  let scratchUpdated = false;
   try {
     for await (const entry of localFolderHandle.values()) {
       if (!entry || entry.kind !== "file") continue;
       const name = String(entry.name || "");
-      if (!name.toLowerCase().endsWith(".s")) continue;
+      const lower = name.toLowerCase();
+      if (lower === LOCAL_SCRATCH_FILE) {
+        const changed = await refreshLocalScratchFromFolder(entry);
+        if (changed) scratchUpdated = true;
+        continue;
+      }
+      if (!lower.endsWith(".s")) continue;
       const scriptName = localScriptNameFromFile(name);
       if (!scriptName) continue;
       const file = await entry.getFile();
+      updateLocalFileMeta(name, file);
       const text = await file.text();
       seen += 1;
 
@@ -976,10 +994,15 @@ async function syncLocalFolder() {
   }
 
   if (!seen) {
-    writeLine("Local sync complete: no .s files found.", "dim");
+    if (scratchUpdated) {
+      writeLine("Local sync complete: scratch updated.", "ok");
+    } else {
+      writeLine("Local sync complete: no .s files found.", "dim");
+    }
     return;
   }
-  writeLine(`Local sync complete: ${added} new, ${updated} updated, ${unchanged} unchanged.`, "ok");
+  const suffix = scratchUpdated ? " (+scratch)" : "";
+  writeLine(`Local sync complete: ${added} new, ${updated} updated, ${unchanged} unchanged.${suffix}`, "ok");
   markDirty();
   updateHud();
 }
@@ -991,6 +1014,10 @@ async function writeLocalMirrorFile(name, content) {
   await writable.close();
 }
 
+function shouldMirrorLocal() {
+  return !!(state.localSync && state.localSync.mirror);
+}
+
 function localMirrorFileName(locName, fileName) {
   const loc = String(locName || "").trim();
   const file = String(fileName || "").trim();
@@ -998,7 +1025,7 @@ function localMirrorFileName(locName, fileName) {
 }
 
 async function mirrorDownloadToLocalFolder(locName, fileName, entry) {
-  if (!state.localSync || !state.localSync.mirror) return;
+  if (!shouldMirrorLocal()) return;
   if (!localFolderHandle) {
     writeLine("Local mirror enabled but no folder selected.", "warn");
     return;
@@ -1024,6 +1051,7 @@ async function mirrorDownloadToLocalFolder(locName, fileName, entry) {
 }
 
 async function mirrorUserScriptToLocalFolder(scriptName, code) {
+  if (!shouldMirrorLocal()) return;
   if (!supportsLocalFolder() || !window.isSecureContext) return;
   if (!localFolderHandle) return;
   const perm = await ensureLocalFolderPermission(true);
@@ -1038,6 +1066,131 @@ async function mirrorUserScriptToLocalFolder(scriptName, code) {
     await writeLocalMirrorFile(`${name}.s`, String(code || ""));
   } catch (err) {
     writeLine("Local script save failed: " + (err && err.message ? err.message : "error"), "warn");
+  }
+}
+
+async function mirrorScratchToLocalFolder(text) {
+  if (!shouldMirrorLocal()) return;
+  if (!supportsLocalFolder() || !window.isSecureContext) return;
+  if (!localFolderHandle) return;
+  const perm = await ensureLocalFolderPermission(true);
+  if (!perm.ok) return;
+  try {
+    await writeLocalMirrorFile(LOCAL_SCRATCH_FILE, String(text || ""));
+    localFileMeta.set(LOCAL_SCRATCH_FILE, {
+      lastModified: Date.now(),
+      size: String(text || "").length,
+    });
+  } catch (err) {
+    writeLine("Local scratch save failed: " + (err && err.message ? err.message : "error"), "warn");
+  }
+}
+
+function updateLocalFileMeta(name, file) {
+  if (!file) return;
+  localFileMeta.set(name, { lastModified: file.lastModified || 0, size: file.size || 0 });
+}
+
+async function applyLocalScratchUpdate(text) {
+  if (!scratchPad) return;
+  scratchPad.value = text;
+  saveScratchToStorage();
+  localScratchPending = null;
+}
+
+async function refreshLocalScratchFromFolder(entry) {
+  if (!entry) return false;
+  const file = await entry.getFile();
+  updateLocalFileMeta(LOCAL_SCRATCH_FILE, file);
+  const text = await file.text();
+  if (scratchPad && scratchPad.value === text) return false;
+  if (Date.now() - localScratchLastLocalEdit < 1200) {
+    localScratchPending = text;
+    return false;
+  }
+  await applyLocalScratchUpdate(text);
+  return true;
+}
+
+function ensureLocalSyncPoll() {
+  const canPoll =
+    shouldMirrorLocal() && supportsLocalFolder() && window.isSecureContext && !!localFolderHandle;
+  if (canPoll && !localSyncPoll) {
+    localSyncPoll = window.setInterval(() => {
+      if (localSyncPollActive) return;
+      localSyncPollActive = true;
+      pollLocalFolderChanges()
+        .catch(() => {})
+        .finally(() => {
+          localSyncPollActive = false;
+        });
+    }, 5000);
+  }
+  if (!canPoll && localSyncPoll) {
+    window.clearInterval(localSyncPoll);
+    localSyncPoll = null;
+  }
+}
+
+async function pollLocalFolderChanges() {
+  if (!shouldMirrorLocal()) return;
+  if (!localFolderHandle) return;
+  const perm = await ensureLocalFolderPermission(false);
+  if (!perm.ok) return;
+
+  let scriptUpdates = 0;
+  let scratchUpdated = false;
+  for await (const entry of localFolderHandle.values()) {
+    if (!entry || entry.kind !== "file") continue;
+    const name = String(entry.name || "");
+    const lower = name.toLowerCase();
+    const isScratch = lower === LOCAL_SCRATCH_FILE;
+    const isScript = lower.endsWith(".s");
+    if (!isScratch && !isScript) continue;
+
+    const file = await entry.getFile();
+    const prior = localFileMeta.get(name);
+    const sameMeta = prior && prior.lastModified === file.lastModified && prior.size === file.size;
+    if (sameMeta) continue;
+
+    if (isScratch) {
+      const changed = await refreshLocalScratchFromFolder(entry);
+      if (changed) scratchUpdated = true;
+      continue;
+    }
+
+    const text = await file.text();
+    updateLocalFileMeta(name, file);
+    const scriptName = localScriptNameFromFile(name);
+    if (!scriptName) continue;
+    if (!state.handle) continue;
+    const secMatch = text.match(/@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i);
+    const sec = secMatch ? secMatch[1].toUpperCase() : "FULLSEC";
+    const existing = state.userScripts && state.userScripts[scriptName];
+    const existingCode = existing && typeof existing.code === "string" ? existing.code : null;
+    if (!existing || existingCode !== text || existing.sec !== sec) {
+      state.userScripts[scriptName] = { owner: state.handle, name: scriptName, sec, code: text };
+      const driveName = `${state.handle}.${scriptName}.s`;
+      const driveKey = driveId("local", driveName);
+      const meta = { type: "script", script: { name: scriptName, sec, code: text } };
+      if (driveHas(driveKey)) updateDriveContent(driveKey, text, meta);
+      else storeDriveCopy("local", driveName, meta);
+      scriptUpdates += 1;
+    }
+  }
+
+  if (localScratchPending && Date.now() - localScratchLastLocalEdit >= 1200) {
+    await applyLocalScratchUpdate(localScratchPending);
+    scratchUpdated = true;
+  }
+
+  if (scriptUpdates || scratchUpdated) {
+    const bits = [];
+    if (scriptUpdates) bits.push(`${scriptUpdates} script${scriptUpdates === 1 ? "" : "s"}`);
+    if (scratchUpdated) bits.push("scratch");
+    writeLine(`Local sync: updated ${bits.join(" + ")}.`, "ok");
+    markDirty();
+    updateHud();
   }
 }
 
@@ -1190,10 +1343,12 @@ function saveScratchToStorage() {
 
 function scheduleScratchSave() {
   if (!scratchPad) return;
+  localScratchLastLocalEdit = Date.now();
   if (scratchSaveTimer) window.clearTimeout(scratchSaveTimer);
   scratchSaveTimer = window.setTimeout(() => {
     scratchSaveTimer = null;
     saveScratchToStorage();
+    void mirrorScratchToLocalFolder(scratchPad.value);
   }, 250);
 }
 
@@ -4473,6 +4628,7 @@ function hookUi() {
     scratchClear.addEventListener("click", () => {
       scratchPad.value = "";
       saveScratchToStorage();
+      void mirrorScratchToLocalFolder(scratchPad.value);
       // "System Clear" wipes scratch + chat (player request).
       state.chat.log = [];
       state.chat.channel = "#kernel";
@@ -4523,6 +4679,7 @@ function hookUi() {
       writeLine(`Local mirror ${state.localSync.mirror ? "enabled" : "disabled"}.`, "dim");
       markDirty();
       refreshLocalFolderUi();
+      ensureLocalSyncPoll();
     });
   }
 }
@@ -6510,17 +6667,18 @@ function handleCommand(inputText) {
           writeLine(`Mirror downloads: ${state.localSync && state.localSync.mirror ? "on" : "off"}`, "dim");
           break;
         }
-        if (!["on", "off"].includes(flag)) {
-          writeLine("Usage: folder mirror on|off", "warn");
-          break;
-        }
-        if (!state.localSync) state.localSync = { mirror: false };
-        state.localSync.mirror = flag === "on";
-        writeLine(`Local mirror ${state.localSync.mirror ? "enabled" : "disabled"}.`, "ok");
-        markDirty();
-        refreshLocalFolderUi();
+      if (!["on", "off"].includes(flag)) {
+        writeLine("Usage: folder mirror on|off", "warn");
         break;
       }
+      if (!state.localSync) state.localSync = { mirror: false };
+      state.localSync.mirror = flag === "on";
+      writeLine(`Local mirror ${state.localSync.mirror ? "enabled" : "disabled"}.`, "ok");
+      markDirty();
+      refreshLocalFolderUi();
+      ensureLocalSyncPoll();
+      break;
+    }
       writeLine("Usage: folder pick|status|sync|mirror on|off|forget", "warn");
       break;
     }
