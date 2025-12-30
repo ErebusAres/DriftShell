@@ -1402,33 +1402,26 @@ function renderChat() {
     body.className = "chat-body";
 
     const channel = String(m.channel || state.chat.channel);
+    const nameSpan = document.createElement("span");
+    nameSpan.className =
+      "chat-name " + (m.kind === "system" ? "dim" : colorClass);
+    nameSpan.textContent = m.kind === "system" ? "sys" : m.from;
+    nameSpan.dataset.chatName = nameSpan.textContent;
+    body.appendChild(nameSpan);
+
     if (channel.startsWith("@")) {
-      const dir = document.createElement("span");
-      dir.className = "chat-dm-dir dim";
       const isOutgoing = m.from === state.handle;
-      dir.textContent = isOutgoing ? ">>" : "<<";
-      body.appendChild(dir);
-      body.appendChild(document.createTextNode(" "));
-
-      const label = document.createElement("span");
-      label.className = "chat-dm-tag tok magenta";
-      label.textContent = isOutgoing ? "@to" : "@from";
-      body.appendChild(label);
-      body.appendChild(document.createTextNode(" "));
-
-      const who = document.createElement("span");
-      who.className = "chat-dm-tag tok magenta";
-      who.textContent = isOutgoing ? channel : "@" + (m.kind === "system" ? "sys" : m.from);
-      body.appendChild(who);
+      const target = isOutgoing ? channel : "@" + (state.handle || "you");
+      body.appendChild(document.createTextNode(" >> "));
+      const tag = document.createElement("span");
+      tag.className = "chat-dm-tag tok magenta";
+      tag.textContent = target;
+      body.appendChild(tag);
       body.appendChild(document.createTextNode(" :: "));
     } else {
-      const nameSpan = document.createElement("span");
-      nameSpan.className =
-        "chat-name " + (m.kind === "system" ? "dim" : colorClass);
-      nameSpan.textContent = m.kind === "system" ? "sys" : m.from;
-      body.appendChild(nameSpan);
       body.appendChild(document.createTextNode(" :: "));
     }
+
     const msgSpan = document.createElement("span");
     renderTerminalRich(msgSpan, String(m.body));
     body.appendChild(msgSpan);
@@ -1746,6 +1739,18 @@ function handleChatLine(raw) {
       return;
     }
     chatSystem("Unknown chat command. Try /help");
+    return;
+  }
+
+  if (/^tell\s+/i.test(value)) {
+    const parts = splitArgs(value);
+    const npc = parts[1];
+    const msg = parts.slice(2).join(" ");
+    if (!npc) {
+      chatSystem("Usage: tell <npc> <msg>");
+      return;
+    }
+    tellNpc(npc, msg);
     return;
   }
 
@@ -4907,6 +4912,19 @@ function hookUi() {
       runScript(call, { _: [] });
       tutorialAdvance();
       updateHud();
+    });
+  }
+  if (chatLog && chatInput) {
+    chatLog.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const nameEl = target.closest(".chat-name");
+      if (!nameEl) return;
+      const name = String(nameEl.dataset.chatName || "").trim();
+      if (!name || name === "sys") return;
+      if (state.handle && name === state.handle) return;
+      chatInput.value = `/tell ${name} `;
+      chatInput.focus();
     });
   }
 
