@@ -9407,6 +9407,42 @@ function boot() {
 }
 
 boot();
+function maskWithGlitchGlyph(text, level, seed = 0) {
+  const raw = String(text || "");
+  if (!raw) return raw;
+  const chars = raw.split("");
+  // Deterministic seed keeps lines stable; future stabilize/repair mechanics can target this mask.
+  let hash = seed % 9973;
+  for (let i = 0; i < chars.length; i++) hash = (hash + chars[i].charCodeAt(0) * (i + 3)) % 9973;
+
+  // Controlled degradation per corruption tier (never full obfuscation).
+  const ratios = { 1: 0.06, 2: 0.12, 3: 0.18 };
+  const ratio = ratios[Math.max(1, Math.min(3, level || 1))] || 0.06;
+  const max = Math.max(1, Math.floor(chars.length * ratio));
+  const step = Math.max(2, Math.floor(chars.length / max));
+  let replaced = 0;
+  for (let i = 0; i < chars.length && replaced < max; i++) {
+    const c = chars[i];
+    if (!/[A-Za-z0-9]/.test(c)) continue;
+    // Preserve key nouns/commands: avoid replacing when adjacent to separators that mark locs/handles.
+    if (/[.@/:_]/.test(chars[i - 1] || "") || /[.@/:_]/.test(chars[i + 1] || "")) continue;
+    if ((i + hash) % step === 0) {
+      chars[i] = GLITCH_GLYPH; // Standard glyph; no underscores or random ASCII noise.
+      replaced += 1;
+      // Higher tiers mask short runs to feel chunkier while leaving structure readable.
+      if (level >= 2 && replaced < max && /[A-Za-z0-9]/.test(chars[i + 1] || "")) {
+        chars[i + 1] = GLITCH_GLYPH;
+        replaced += 1;
+      }
+      if (level >= 3 && replaced < max && /[A-Za-z0-9]/.test(chars[i + 2] || "")) {
+        chars[i + 2] = GLITCH_GLYPH;
+        replaced += 1;
+      }
+    }
+  }
+  return chars.join("");
+}
+
 function applyEscalationTextEffects(text) {
   // Single entry point for corruption. Only use GLITCH_GLYPH, keep lines readable,
   // and only when regions/content expect it. This avoids global noise and keeps
@@ -9419,28 +9455,11 @@ function applyEscalationTextEffects(text) {
   const region = state.region && state.region.current;
   const severeRegion = region === "secureCore" || region === "cinderDepth";
 
-  // Intensity capped to ~18% of characters to preserve nouns/commands (rule: 15–20% max).
-  const ratio = Math.min(0.18, corruption * 0.06 + trace * 0.04 + (severeRegion ? 0.05 : 0));
-  if (ratio <= 0) return raw;
-
-  // Deterministic mask per-line: avoids jittery randomness and keeps corruption stable.
-  const chars = raw.split("");
-  let hash = 0;
-  for (let i = 0; i < chars.length; i++) hash = (hash + chars[i].charCodeAt(0) * (i + 1)) % 9973;
-  const max = Math.max(1, Math.floor(chars.length * ratio));
-  const step = Math.max(3, Math.floor(chars.length / max));
-  let replaced = 0;
-  for (let i = 0; i < chars.length && replaced < max; i++) {
-    const c = chars[i];
-    if (!/[A-Za-z0-9]/.test(c)) continue;
-    // Preserve key nouns/commands: avoid replacing when adjacent to separators that mark locs/handles.
-    if (/[.@/:_]/.test(chars[i - 1] || "") || /[.@/:_]/.test(chars[i + 1] || "")) continue;
-    if ((i + hash) % step === 0) {
-      chars[i] = GLITCH_GLYPH;
-      replaced += 1;
-    }
-  }
-  return chars.join("");
+  // Corruption level governs intensity; trace nudges pacing without erasing structure.
+  const level = Math.max(1, corruption);
+  const seed = trace + (severeRegion ? 7 : 0);
+  // Masking is centralized so future repair/stabilize mechanics can target this layer.
+  return maskWithGlitchGlyph(raw, level, seed);
 }
 
 function corruptionAllowed(text) {
@@ -9473,11 +9492,11 @@ function corruptionAllowed(text) {
   const fragmentContext = /fragment\.(alpha|beta|gamma|delta)/i.test(text || "") || hasGlyph;
   const rogueResponding = /rogue/i.test(text || "") && (loc === "rogue.core" || glitchRegions.has(region));
 
-  // Glitch allowed only when justified: elevated corruption, glitch zones, fragment repair, or rogue response.
-  if (corruption >= 2) return true;
+  // Glitch allowed only when justified: corruption is active OR region is glitched (future repair can hook here).
+  if (corruption <= 0 && !inGlitchZone) return false;
   if (inGlitchZone) return true;
-  if (fragmentContext) return true;
-  if (rogueResponding) return true;
+  if (corruption >= 1 && fragmentContext) return true;
+  if (corruption >= 1 && rogueResponding) return true;
   return false; // Ambient/system text stays clean.
 }
 
