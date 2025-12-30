@@ -425,7 +425,7 @@ function setCorruptionLevel(level) {
 
 function markDirty() {
   saveDirty = true;
-  if (typeof RegionManager !== "undefined") RegionManager.syncUnlocks({ silent: true });
+  if (typeof RegionManager !== "undefined") RegionManager.bootstrap({ silent: true });
   scheduleAutosave();
 }
 
@@ -2914,6 +2914,14 @@ const RegionManager = (() => {
     });
   }
 
+  function bootstrap({ silent } = {}) {
+    ensureState();
+    syncUnlocks({ silent });
+    if (!state.region.current && state.region.unlocked.size) {
+      state.region.current = Array.from(state.region.unlocked)[0];
+    }
+  }
+
   function noteDiscovery(node) {
     ensureState();
     const regionId = regionForNode(node);
@@ -2999,6 +3007,7 @@ const RegionManager = (() => {
   return {
     ensureState,
     syncUnlocks,
+    bootstrap,
     regionForNode,
     isNodeVisible,
     canAccessNode,
@@ -3016,8 +3025,7 @@ function onRegionEnter(region) {
 }
 
 // Initialize region progression at boot so regions with no requirements open immediately.
-RegionManager.ensureState();
-RegionManager.syncUnlocks({ silent: true });
+RegionManager.bootstrap({ silent: true });
 
 const MARKS = [
   { id: "mark.scan", text: "Run scripts.trust.scan" },
@@ -4277,7 +4285,7 @@ function discover(locs) {
       newly.push(loc);
     }
   });
-  RegionManager.syncUnlocks({ silent: true });
+  RegionManager.bootstrap({ silent: true });
   return newly;
 }
 
@@ -6656,7 +6664,7 @@ function updateHud() {
 
 function storyChatTick() {
   if (!state.handle) return;
-  RegionManager.syncUnlocks({ silent: true });
+  RegionManager.bootstrap({ silent: true });
   if (state.loc === "home.hub" && !state.flags.has("chat_intro")) {
     state.flags.add("chat_intro");
     chatPost({
@@ -6875,6 +6883,7 @@ function startBreach(locName) {
     writeLine("Loc not found.", "error");
     return;
   }
+  RegionManager.bootstrap({ silent: true });
   const regionGate = RegionManager.canAccessNode(locName);
   if (!regionGate.ok) {
     writeLine(`Region sealed: ${regionGate.name} (${regionGate.hint || "route cooling"})`, "warn");
@@ -7020,6 +7029,7 @@ function connectLoc(locName) {
     writeLine("Loc not found.", "error");
     return;
   }
+  RegionManager.bootstrap({ silent: true });
   const regionGate = RegionManager.canAccessNode(locName);
   if (!regionGate.ok) {
     writeLine(`Region sealed: ${regionGate.name} (${regionGate.hint || "route cooling"})`, "warn");
@@ -7402,8 +7412,7 @@ function loadState(options) {
   state.unlocked.add("island.grid");
   state.discovered.add("trust.anchor");
   state.unlocked.add("trust.anchor");
-  RegionManager.ensureState();
-  RegionManager.syncUnlocks({ silent: true });
+  RegionManager.bootstrap({ silent: true });
   // scratchpad is user-authored; don't clear on load
   if (!opts.silent) writeLine("State loaded.", "ok");
   ensureDriveBackfill({ silent: true });
@@ -7546,8 +7555,7 @@ function turnIn(what) {
 
 function diagnoseProgress() {
   writeLine("DIAGNOSE", "header");
-  RegionManager.ensureState();
-  RegionManager.syncUnlocks({ silent: true });
+  RegionManager.bootstrap({ silent: true });
   const lockedRegions = REGION_DEFS.filter((def) => !state.region.unlocked.has(def.id));
   if (lockedRegions.length) {
     writeLine("Regions:", "header");
@@ -7739,6 +7747,7 @@ function handleCommand(inputText) {
     writeLine(`HANDLE SET: ${state.handle}`, "ok");
     chatPost({ channel: state.chat.channel, from: "sys", body: `*** ${state.handle} connected`, kind: "system" });
     loadScratchFromStorage();
+    RegionManager.bootstrap({ silent: true });
     showLoc();
     RegionManager.enterRegionByNode(state.loc);
     storyChatTick();
