@@ -318,8 +318,9 @@ function trustAdjustHeat(delta, reason) {
   state.trust.heat = next;
   maybeTeachSecurityMoment(delta);
   if (next > 0) state.storyState?.flags?.add("heat_seen");
-   // Heat implies noise; track for rogue adaptation.
+  // Heat implies noise; track for adaptation.
   if (delta > 0) recordRogueBehavior("noise");
+  if (delta > 0) recordBehavior("noise");
   const added = discover(["trust.anchor"]);
   if (added.length) {
     chatPost({
@@ -359,6 +360,10 @@ function trustCoolDown(amount, reason) {
   const next = Math.max(0, trustHeat() - amount);
   state.trust.heat = next;
   if (reason && reason !== "wait") chatSystem(`trust cool (${reason}) -> heat ${next}/${TRUST_HEAT_THRESHOLD}`);
+  if (reason === "wait" || reason === "anchor read") {
+    recordBehavior("patient");
+    recordRogueBehavior("careful");
+  }
   markDirty();
   updateHud();
 }
@@ -2922,6 +2927,7 @@ const state = {
     failed: new Set(),
   },
   rogueProfile: { noise: 0, careful: 0, brute: 0, failures: 0, outcomes: new Set() },
+  behaviorProfile: { noise: 0, careful: 0, aggressive: 0, patient: 0 },
 };
 
 // RegionManager tracks named network zones (regions), which nodes they contain,
@@ -5677,6 +5683,8 @@ function waitTick() {
     if (state.trace > 0) state.trace -= 1;
     if (state.trace === 0) writeLine("trace is cold", "ok");
     trustCoolDown(TRUST_COOLDOWN_ON_WAIT, "wait");
+    recordBehavior("patient");
+    recordRogueBehavior("careful");
     storyChatTick();
     markDirty();
     return;
@@ -6353,6 +6361,20 @@ function triggerNarrativeStepForLoc(locName) {
   }
 }
 
+// Occasionally alter tone based on dominant behavior (in-world, no explicit callouts).
+function behaviorToneNudge() {
+  const dom = dominantBehavior();
+  if (!dom) return;
+  const key = `behavior_tone_${dom}`;
+  if (state.flags.has(key)) return;
+  if (Math.random() < 0.5) return; // keep it occasional
+  state.flags.add(key);
+  if (dom === "noise") chatPost({ channel: "#kernel", from: "watcher", body: "your signal leaves a wake. some nodes may start whispering back." });
+  if (dom === "careful") chatPost({ channel: "#kernel", from: "switchboard", body: "quiet hands get noticed differently. some doors stay polite longer." });
+  if (dom === "aggressive") chatPost({ channel: "#kernel", from: "archivist", body: "blunt entries leave marks. archives will remember the scars." });
+  if (dom === "patient") chatPost({ channel: "#kernel", from: "watcher", body: "stillness is a kind of noise too. the net adjusts." });
+}
+
 function decodeCipher(type, payload) {
   const data = payload || state.lastCipher;
   if (!data) {
@@ -6412,6 +6434,30 @@ function recordRogueBehavior(kind) {
   if (kind === "careful") rp.careful += 1;
   if (kind === "brute") rp.brute += 1;
   if (kind === "fail") rp.failures += 1;
+}
+
+// General behavior tracking for future adaptive responses (kept invisible to the player).
+function recordBehavior(kind) {
+  if (!state.behaviorProfile || typeof state.behaviorProfile !== "object") {
+    state.behaviorProfile = { noise: 0, careful: 0, aggressive: 0, patient: 0 };
+  }
+  const bp = state.behaviorProfile;
+  if (kind === "noise") bp.noise += 1;
+  if (kind === "careful") bp.careful += 1;
+  if (kind === "aggressive") bp.aggressive += 1;
+  if (kind === "patient") bp.patient += 1;
+}
+
+function dominantBehavior() {
+  const bp = state.behaviorProfile || {};
+  const entries = [
+    ["noise", bp.noise || 0],
+    ["careful", bp.careful || 0],
+    ["aggressive", bp.aggressive || 0],
+    ["patient", bp.patient || 0],
+  ];
+  entries.sort((a, b) => b[1] - a[1]);
+  return entries[0][1] > 0 ? entries[0][0] : null;
 }
 
 function ensureStoryState() {
@@ -6990,6 +7036,7 @@ function storyChatTick() {
   if (!state.handle) return;
   RegionManager.bootstrap({ silent: true });
   triggerNarrativeStepForLoc(state.loc);
+  behaviorToneNudge();
   if (state.loc === "home.hub" && !state.flags.has("chat_intro")) {
     state.flags.add("chat_intro");
     chatPost({
@@ -7316,6 +7363,7 @@ function failBreach() {
   trustAdjustHeat(1, "failed lock");
   recordRogueBehavior("fail");
   recordRogueBehavior("brute");
+  recordBehavior("aggressive");
   if (state.trace >= state.traceMax) {
     writeLine("TRACE LIMIT HIT. CONNECTION DROPPED.", "error");
 
@@ -7694,6 +7742,12 @@ function getSaveData() {
       failures: state.rogueProfile ? state.rogueProfile.failures || 0 : 0,
       outcomes: Array.from((state.rogueProfile && state.rogueProfile.outcomes) || []),
     },
+    behaviorProfile: {
+      noise: state.behaviorProfile ? state.behaviorProfile.noise || 0 : 0,
+      careful: state.behaviorProfile ? state.behaviorProfile.careful || 0 : 0,
+      aggressive: state.behaviorProfile ? state.behaviorProfile.aggressive || 0 : 0,
+      patient: state.behaviorProfile ? state.behaviorProfile.patient || 0 : 0,
+    },
   };
 }
 
@@ -7826,6 +7880,15 @@ function loadState(options) {
           outcomes: new Set(data.rogueProfile.outcomes || []),
         }
       : state.rogueProfile || { noise: 0, careful: 0, brute: 0, failures: 0, outcomes: new Set() };
+  state.behaviorProfile =
+    data.behaviorProfile && typeof data.behaviorProfile === "object"
+      ? {
+          noise: Number(data.behaviorProfile.noise) || 0,
+          careful: Number(data.behaviorProfile.careful) || 0,
+          aggressive: Number(data.behaviorProfile.aggressive) || 0,
+          patient: Number(data.behaviorProfile.patient) || 0,
+        }
+      : state.behaviorProfile || { noise: 0, careful: 0, aggressive: 0, patient: 0 };
   if (data.chat) {
     state.chat.channel = data.chat.channel || "#kernel";
     state.chat.channels = new Set(data.chat.channels || ["#kernel"]);
