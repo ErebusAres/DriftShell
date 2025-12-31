@@ -114,10 +114,6 @@ body.corrupt2 {
 }
 
 body.corrupt3 {
-  filter: hue-rotate(14deg) saturate(1.12) contrast(1.05);
-}
-
-body.corrupt3 {
   filter: hue-rotate(24deg) saturate(1.35) contrast(1.12);
 }
 
