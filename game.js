@@ -6421,10 +6421,9 @@ function stabilizeGlitch() {
 
   writeLine("still hot (don't spam wait)", "warn");
   // Light punishment: repeated spam can raise trace a bit.
-  if (state.wait.streak >= 3 && Math.random() < 0.35) {
-    writeLine("passive scan catches movement", "warn");
-    failBreach();
-  }
+if (state.wait.streak >= 3 && Math.random() < 0.35) {
+  writeLine("passive scan catches movement", "warn");
+  failBreach();
 }
 
 function pingCommand(args) {
