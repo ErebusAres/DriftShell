@@ -522,6 +522,10 @@ function applyCorruptionClasses() {
   document.body.classList.toggle("corrupt1", level === 1);
   document.body.classList.toggle("corrupt2", level === 2);
   document.body.classList.toggle("corrupt3", level === 3);
+  if (screen) {
+    screen.classList.toggle("screen-corrupt1", level >= 1);
+    screen.classList.toggle("screen-corrupt2", level >= 2);
+  }
 }
 
 function setCorruptionLevel(level) {
