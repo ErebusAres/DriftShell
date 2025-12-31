@@ -1773,7 +1773,7 @@ async function pollLocalFolderChanges() {
 function writeLine(text, kind) {
   const line = document.createElement("div");
   line.className = `line${kind ? " " + kind : ""}`;
-  renderTerminalRich(line, String(text));
+  renderTerminalRich(line, applyEscalationTextEffects(String(text)));
   screen.appendChild(line);
   screen.scrollTop = screen.scrollHeight;
 }
@@ -4326,16 +4326,16 @@ const LOCS = {
       },
     },
   },
-  "lattice.cache": {
-    title: "LATTICE.CACHE",
+  "deep.slate": {
+    title: "DEEP.SLATE",
     desc: [
-      "A vault of interlocked lattice.",
-      "The air tastes like static and old promises.",
+      "A slate of old relays stacked under the archive.",
+      "Signals smear here; patience and trust keep them readable.",
     ],
-    requirements: { items: ["token.key", "weaver.mark"], flags: ["lattice_sigil"] },
+    requirements: { flags: ["trace_open", "lattice_sigil"], trust: 2 },
     locks: [
       {
-        prompt: "LOCK: confirm lattice sigil",
+        prompt: "LOCK: recite the lattice sigil",
         answer: "SIGIL: LATTICE",
         hint: "Decode key.b64 in the archive.",
       },
@@ -6001,13 +6001,149 @@ function waitTick() {
     markDirty();
     return;
   }
-
-  writeLine("still hot (don't spam wait)", "warn");
-  // Light punishment: repeated spam can raise trace a bit.
-  if (state.wait.streak >= 3 && Math.random() < 0.35) {
-    writeLine("passive scan catches movement", "warn");
-    failBreach();
+  if (state.flags.has("glitch_stabilizer")) {
+    writeLine("You already anchored the thread.", "warn");
+    return;
   }
+  if (state.flags.has("glitch_exploiter")) {
+    writeLine("The fragment is already bleeding power.", "dim");
+    return;
+  }
+  state.flags.add("glitch_exploiter");
+  state.flags.add("glitch_path_memory");
+  state.gc = Math.max(0, (Number(state.gc) || 0) + 25);
+  trustAdjustHeat(2, "glitch splice");
+  profiledTraceRise(1, "glitch splice");
+  setCorruptionLevel(Math.min(3, corruptionLevel() + 1));
+  chatPost({ channel: "#kernel", from: "rogue", body: "you pull the crack wider. residue banks, eyes notice." });
+  // Future exploit hook: amplified corruption could be weaponized later.
+  maybeLockTrustProfile("glitch");
+  markDirty();
+}
+
+function pingCommand(args) {
+  const region = state.currentRegion || (state.region && state.region.current);
+  if (region !== "introNet") {
+    writeLine("Ping drifts out; nothing notable answers.", "dim");
+    return;
+  }
+  islandPing(args);
+}
+
+function islandPing(args) {
+  const loc = state.loc || "";
+  // Safe failure: a tempting island-only button that raises heat, teaching risk without lasting punishment.
+  if (loc !== "island.grid" && loc !== "island.echo" && loc !== "home.hub") {
+    writeLine("The island beacon only hears pings nearby.", "dim");
+    return;
+  }
+  const mem = introMemoryState();
+  const now = Date.now();
+  const fast = now - (Number(mem.lastPingAt) || 0) < 2500;
+  mem.lastPingAt = now;
+  mem.pingCount = (Number(mem.pingCount) || 0) + 1;
+  mem.pingStreak = fast ? (Number(mem.pingStreak) || 0) + 1 : 1;
+
+  if (mem.pingCount === 1) writeLine("Beacon answers with a soft tone. Feels harmless.", "dim");
+  else if (fast) writeLine("Beacon heats up; echoes sharpen.", "warn");
+  else writeLine("Beacon hums warmer than before.", "warn");
+
+  // Designed stumble: spamming the beacon is tempting, but it raises heat safely to teach consequences.
+  trustAdjustHeat(1, "island ping");
+
+  if (mem.pingStreak >= 2) {
+    const gained = state.trace < state.traceMax ? 1 : 0;
+    if (gained > 0) {
+      state.trace += gained;
+      introTraceTeach("island ping");
+      watcherTraceReact("island ping");
+      writeLine(`TRACE +${gained} (${state.trace}/${state.traceMax})`, "warn");
+    }
+  }
+  if (mem.pingCount >= 2 && trustHeat() > 0) state.flags.add("intro_heat_memory"); // Trust as memory: later tone reacts.
+  markDirty();
+}
+
+function meshBridgeCommand() {
+  RegionManager.bootstrap({ silent: true });
+  if (meshBridgeActive()) {
+    writeLine("bridge already holds toward the mesh.", "dim");
+    return;
+  }
+
+  state.flags.add(MESH_BRIDGE_FLAG);
+  const targetRegion = "publicNet";
+  const def = REGION_DEFS.find((r) => r.id === targetRegion);
+  if (!state.region || typeof state.region !== "object") {
+    state.region = { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() };
+  }
+  if (!(state.region.unlocked instanceof Set)) state.region.unlocked = new Set(state.region.unlocked || []);
+  if (!(state.region.visited instanceof Set)) state.region.visited = new Set(state.region.visited || []);
+  if (!(state.region.pending instanceof Set)) state.region.pending = new Set(state.region.pending || []);
+  if (def) {
+    state.region.unlocked.add(targetRegion);
+    def.nodes.forEach((node) => state.region.pending.delete(node));
+    def.nodes.forEach((node) => {
+      if (!state.discovered.has(node)) state.discovered.add(node);
+    });
+  } else {
+    state.region.unlocked.add(targetRegion);
+  }
+  state.region.current = targetRegion;
+  state.currentRegion = targetRegion;
+  state.region.visited.add(targetRegion);
+  setZone(zoneForRegion(targetRegion));
+  onRegionEnter(def || { id: targetRegion });
+  writeLine("bridge settles; mesh hum turns distant.", "dim");
+  markDirty();
+  updateHud();
+}
+
+function stabilizeGlitch() {
+  if (!state.flags.has("glitch_fragment_seen")) {
+    writeLine("No unstable fragment nearby.", "dim");
+    return;
+  }
+  if (state.flags.has("glitch_exploiter")) {
+    writeLine("Signal remembers you pulled it apart.", "warn");
+    return;
+  }
+  if (state.flags.has("glitch_stabilizer")) {
+    writeLine("Thread already steadied.", "dim");
+    return;
+  }
+  state.flags.add("glitch_stabilizer");
+  state.flags.add("glitch_path_memory");
+  setCorruptionLevel(Math.max(0, corruptionLevel() - 1));
+  trustCoolDown(1, "glitch stabilize");
+  chatPost({ channel: "#kernel", from: "watcher", body: "you steady the crack. some lines stay readable now." });
+  // Future repair hook: stabilized fragments could be rebuilt later without re-parsing lore.
+  markDirty();
+}
+
+function spliceGlitch() {
+  if (!state.flags.has("glitch_fragment_seen")) {
+    writeLine("Nothing to splice.", "dim");
+    return;
+  }
+  if (state.flags.has("glitch_stabilizer")) {
+    writeLine("You already anchored the thread.", "warn");
+    return;
+  }
+  if (state.flags.has("glitch_exploiter")) {
+    writeLine("The fragment is already bleeding power.", "dim");
+    return;
+  }
+  state.flags.add("glitch_exploiter");
+  state.flags.add("glitch_path_memory");
+  state.gc = Math.max(0, (Number(state.gc) || 0) + 25);
+  trustAdjustHeat(2, "glitch splice");
+  profiledTraceRise(1, "glitch splice");
+  setCorruptionLevel(Math.min(3, corruptionLevel() + 1));
+  chatPost({ channel: "#kernel", from: "rogue", body: "you pull the crack wider. residue banks, eyes notice." });
+  // Future exploit hook: amplified corruption could be weaponized later.
+  maybeLockTrustProfile("glitch");
+  markDirty();
 }
 
 function pingCommand(args) {
