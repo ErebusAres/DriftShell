@@ -452,6 +452,7 @@ const prompt = document.getElementById("prompt");
 const statusLine = document.getElementById("status-line");
 const gcSpan = document.getElementById("gc");
 const traceSpan = document.getElementById("trace");
+const hud = document.getElementById("hud");
 const hint = document.getElementById("hint");
 const chatLog = document.getElementById("chat-log");
 const chatInput = document.getElementById("chat-input");
@@ -477,6 +478,7 @@ let localSyncPoll = null;
 let localSyncPollActive = false;
 let localScratchLastLocalEdit = 0;
 let localScratchPending = null;
+let glitchBlipTimer = null;
 const localFileMeta = new Map();
 const AUTOSAVE_MIN_INTERVAL_MS = 15_000;
 const AUTOSAVE_FORCE_INTERVAL_MS = 60_000;
@@ -612,7 +614,7 @@ function runBootSequence({ hasSave }) {
   screen.innerHTML = "";
 
   // Rotating boot easter eggs (real pop-culture/game nods; short lines).
-  const EASTER_EGG_LINES = [
+const EASTER_EGG_LINES = [
     // cyberpunk / netrunning
     "wake up, samurai...",
     "night city ........ online",
@@ -784,10 +786,11 @@ function runBootSequence({ hasSave }) {
     "so say we all",
     "live long and prosper",
     "the spice must flow",
-    "this is fine",
-    "i'm in",
-  ];
-  const easterEgg = EASTER_EGG_LINES[Math.floor(Math.random() * EASTER_EGG_LINES.length)];
+  "this is fine",
+  "i'm in",
+];
+// Deterministic pick so the boot banner is consistent each session.
+const easterEgg = EASTER_EGG_LINES[0];
 
   const logo = [
     "  _____   _____   _____  ______  _______  _____  _    _  ______  _       _      ",
@@ -799,31 +802,31 @@ function runBootSequence({ hasSave }) {
     "                           DRIFTSHELL :: DRIFT LOCAL",
   ];
 
-  // Print logo first, then boot lines under it.
+  // Print logo first, line by line with fixed cadence for an old terminal feel.
   const baseLogoAt = 120;
-  logo.forEach((line, idx) => scheduleBootLine(line, "boot bootlogo header", baseLogoAt + idx * 70));
+  logo.forEach((line, idx) => scheduleBootLine(line, "boot bootlogo header", baseLogoAt + idx * 90));
 
-  const afterLogoAt = baseLogoAt + logo.length * 70 + 220;
-  scheduleBootLine(" ", "boot bootlogo dim", afterLogoAt - 120);
+  const afterLogoAt = baseLogoAt + logo.length * 90 + 180;
+  scheduleBootLine(" ", "boot bootlogo dim", afterLogoAt - 90);
 
   const steps = [
     { t: 0, kind: "boot bootlog dim", text: "BOOTSTRAP v0.9 :: drift-compatible" },
-    { t: 220, kind: "boot bootlog dim", text: "devsig ............ ErebusAres" },
-    { t: 430, kind: "boot bootlog dim", text: "memchk ............ ok" },
-    { t: 640, kind: "boot bootlog dim", text: "ioctl  ............ ok" },
-    { t: 860, kind: "boot bootlog dim", text: "gpu   ............. ok" },
-    { t: 1100, kind: "boot bootlog dim", text: "netlink DRIFT/LOCAL  ok" },
-    { t: 1320, kind: "boot bootlog dim", text: "chatd ............. init" },
-    { t: 1540, kind: "boot bootlog dim", text: hasSave ? "scratch ........... restoring session" : "scratch ........... ready" },
-    // Easter egg (random)
-    { t: 1760, kind: "boot bootlog dim", text: easterEgg },
-    { t: 1980, kind: "boot bootlog dim", text: "mount /shell ....... ok" },
-    { t: 2200, kind: "boot bootlog dim", text: "press any key to skip" },
+    { t: 210, kind: "boot bootlog dim", text: "devsig ............ ErebusAres" },
+    { t: 410, kind: "boot bootlog dim", text: "memchk ............ ok" },
+    { t: 610, kind: "boot bootlog dim", text: "ioctl  ............ ok" },
+    { t: 820, kind: "boot bootlog dim", text: "gpu   ............. ok" },
+    { t: 1030, kind: "boot bootlog dim", text: "netlink DRIFT/LOCAL  ok" },
+    { t: 1240, kind: "boot bootlog dim", text: "chatd ............. init" },
+    { t: 1450, kind: "boot bootlog dim", text: hasSave ? "scratch ........... restoring session" : "scratch ........... ready" },
+    // Easter egg (now fixed to keep boot deterministic)
+    { t: 1660, kind: "boot bootlog dim", text: easterEgg },
+    { t: 1870, kind: "boot bootlog dim", text: "mount /shell ....... ok" },
+    { t: 2080, kind: "boot bootlog dim", text: "press any key to skip" },
   ];
 
   steps.forEach((s) => scheduleBootLine(s.text, s.kind, afterLogoAt + s.t));
 
-  const doneAt = afterLogoAt + 2550;
+  const doneAt = afterLogoAt + 2300;
   const finish = () => {
     clearBootTimers();
     setBooting(false);
@@ -7362,6 +7365,19 @@ function runScript(name, args, caller) {
 function updateHud() {
   gcSpan.textContent = state.gc;
   traceSpan.textContent = `${state.trace}/${state.traceMax}`;
+  // Trace awareness: subtle hue shift near the indicator only.
+  document.body.classList.remove("trace-warm", "trace-hot", "trace-critical");
+  const traceRatio = state.traceMax > 0 ? state.trace / state.traceMax : 0;
+  if (traceRatio >= 0.75) document.body.classList.add("trace-critical");
+  else if (traceRatio >= 0.45) document.body.classList.add("trace-hot");
+  else if (traceRatio >= 0.25) document.body.classList.add("trace-warm");
+
+  // Trust tone: mild tint on HUD based on trust level.
+  document.body.classList.remove("trust-low", "trust-high");
+  const t = trustLevel();
+  if (t <= 1) document.body.classList.add("trust-low");
+  else if (t >= 3) document.body.classList.add("trust-high");
+
   const dl = state.downloads && (state.downloads.active || state.downloads.queue.length);
   let dlStatus = "";
   if (state.downloads.active) {
@@ -9615,12 +9631,25 @@ function maskWithGlitchGlyph(text, level, seed = 0) {
   return chars.join("");
 }
 
+function glitchBlip() {
+  if (glitchBlipTimer) {
+    window.clearTimeout(glitchBlipTimer);
+    glitchBlipTimer = null;
+  }
+  document.body.classList.add("glitch-blip");
+  glitchBlipTimer = window.setTimeout(() => {
+    document.body.classList.remove("glitch-blip");
+    glitchBlipTimer = null;
+  }, 220);
+}
+
 function applyEscalationTextEffects(text) {
   // Single entry point for corruption. Only use GLITCH_GLYPH, keep lines readable,
   // and only when regions/content expect it. This avoids global noise and keeps
   // glyph use thematic.
   const raw = String(text || "");
   if (!corruptionAllowed(raw)) return raw;
+  if (raw.includes(GLITCH_GLYPH) || /rogue/i.test(raw)) glitchBlip();
 
   const trace = state.trace || 0;
   const corruption = corruptionLevel();
