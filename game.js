@@ -789,12 +789,12 @@ const EASTER_EGG_LINES = [
     "winter is coming",
     "so say we all",
     "live long and prosper",
-    "the spice must flow",
+  "the spice must flow",
   "this is fine",
   "i'm in",
 ];
-// Deterministic pick so the boot banner is consistent each session.
-const easterEgg = EASTER_EGG_LINES[0];
+// Boot chatter is intentionally random to keep the shell feeling alive; logo stays deterministic.
+const easterEgg = EASTER_EGG_LINES[Math.floor(Math.random() * EASTER_EGG_LINES.length)];
 
   const logo = [
     "  _____   _____   _____  ______  _______  _____  _    _  ______  _       _      ",
@@ -806,31 +806,31 @@ const easterEgg = EASTER_EGG_LINES[0];
     "                           DRIFTSHELL :: DRIFT LOCAL",
   ];
 
-  // Print logo first, line by line with fixed cadence for an old terminal feel.
-  const baseLogoAt = 120;
-  logo.forEach((line, idx) => scheduleBootLine(line, "boot bootlogo header", baseLogoAt + idx * 90));
+  // Print logo first, line by line with fixed cadence for an old terminal feel (deterministic).
+  const baseLogoAt = 90;
+  logo.forEach((line, idx) => scheduleBootLine(line, "boot bootlogo header", baseLogoAt + idx * 80));
 
-  const afterLogoAt = baseLogoAt + logo.length * 90 + 180;
-  scheduleBootLine(" ", "boot bootlogo dim", afterLogoAt - 90);
+  const afterLogoAt = baseLogoAt + logo.length * 80 + 140;
+  scheduleBootLine(" ", "boot bootlogo dim", afterLogoAt - 80);
 
   const steps = [
     { t: 0, kind: "boot bootlog dim", text: "BOOTSTRAP v0.9 :: drift-compatible" },
-    { t: 210, kind: "boot bootlog dim", text: "devsig ............ ErebusAres" },
-    { t: 410, kind: "boot bootlog dim", text: "memchk ............ ok" },
-    { t: 610, kind: "boot bootlog dim", text: "ioctl  ............ ok" },
-    { t: 820, kind: "boot bootlog dim", text: "gpu   ............. ok" },
-    { t: 1030, kind: "boot bootlog dim", text: "netlink DRIFT/LOCAL  ok" },
-    { t: 1240, kind: "boot bootlog dim", text: "chatd ............. init" },
-    { t: 1450, kind: "boot bootlog dim", text: hasSave ? "scratch ........... restoring session" : "scratch ........... ready" },
-    // Easter egg (now fixed to keep boot deterministic)
-    { t: 1660, kind: "boot bootlog dim", text: easterEgg },
-    { t: 1870, kind: "boot bootlog dim", text: "mount /shell ....... ok" },
-    { t: 2080, kind: "boot bootlog dim", text: "press any key to skip" },
+    { t: 130, kind: "boot bootlog dim", text: "devsig ............ ErebusAres" },
+    { t: 260, kind: "boot bootlog dim", text: "memchk ............ ok" },
+    { t: 390, kind: "boot bootlog dim", text: "ioctl  ............ ok" },
+    { t: 520, kind: "boot bootlog dim", text: "gpu   ............. ok" },
+    { t: 650, kind: "boot bootlog dim", text: "netlink DRIFT/LOCAL  ok" },
+    { t: 780, kind: "boot bootlog dim", text: "chatd ............. init" },
+    { t: 910, kind: "boot bootlog dim", text: hasSave ? "scratch ........... restoring session" : "scratch ........... ready" },
+    // Easter egg remains random each boot; only this line varies.
+    { t: 1040, kind: "boot bootlog dim", text: easterEgg },
+    { t: 1170, kind: "boot bootlog dim", text: "mount /shell ....... ok" },
+    { t: 1300, kind: "boot bootlog dim", text: "press any key to skip" },
   ];
 
   steps.forEach((s) => scheduleBootLine(s.text, s.kind, afterLogoAt + s.t));
 
-  const doneAt = afterLogoAt + 2300;
+  const doneAt = afterLogoAt + 1500;
   const finish = () => {
     clearBootTimers();
     setBooting(false);
