@@ -518,6 +518,7 @@ const NON_DIRTY_COMMANDS = new Set([
 let RegionManager;
 let ESCALATION_SILENCE = 0;
 let SECURITY_TEACH_SHOWN = false;
+let LOCAL_BADNAME_WARNED = false;
 
 function meshBridgeActive() {
   return state.flags.has(MESH_BRIDGE_FLAG);
@@ -538,6 +539,11 @@ function isCanonicalScriptName(name) {
   const key = String(name || "").trim();
   const parts = key.replace(/^drive:local\//i, "").replace(/\.s$/i, "").split(".");
   return parts.length >= 3 && parts[0] === handle && parts[1] === "local";
+}
+
+function isSimpleDiskScriptName(name) {
+  // Local disk files are transport only: simple base names ending with .s (no prefixes, dots, or namespaces).
+  return /^[A-Za-z0-9_-]+\.s$/.test(String(name || ""));
 }
 function scriptBaseFromKey(key) {
   const handle = state.handle ? String(state.handle) : "";
@@ -579,6 +585,10 @@ function findUserScript(rawName) {
 
 function upsertUserScript(rawName, sec, code, zoneHint) {
   if (!state.userScripts || typeof state.userScripts !== "object") state.userScripts = {};
+  if (isCanonicalScriptName(rawName)) {
+    state.userScripts[rawName] = { owner: state.handle, name: rawName, sec, code };
+    return rawName;
+  }
   const found = findUserScript(rawName);
   // Canonicalize exactly once; skip if already canonical to avoid recursive prefixes.
   const target =
@@ -1368,34 +1378,8 @@ async function initLocalFolder() {
 }
 
 async function backfillLocalFolderFromDrive(options) {
-  const opts = options || {};
-  if (!shouldMirrorLocal()) return;
-  if (!supportsLocalFolder() || !window.isSecureContext) return;
-  if (!localFolderHandle) return;
-  const canWrite = opts.prompt
-    ? (await ensureLocalFolderPermission(true)).ok
-    : await localFolderPermissionGranted(true);
-  if (!canWrite) return;
-
-  let added = 0;
-  const entries = Object.values(state.drive || {});
-  for (const entry of entries) {
-    if (!entry || (entry.type !== "script" && entry.type !== "text")) continue;
-    const name = localMirrorFileName(entry.loc, entry.name);
-    let exists = false;
-    try {
-      await localFolderHandle.getFileHandle(name);
-      exists = true;
-    } catch {}
-    if (exists) continue;
-    const content = String(entry.content || "");
-    try {
-      await writeLocalMirrorFile(name, content);
-      localFileMeta.set(name, { lastModified: Date.now(), size: content.length });
-      added += 1;
-    } catch {}
-  }
-  if (!opts.silent && added) writeLine(`Local sync: mirrored ${added} drive file(s).`, "dim");
+  // No-op: exports are disabled to keep disk filenames simple and free of namespaces.
+  return;
 }
 
 async function pickLocalFolder() {
@@ -1482,21 +1466,27 @@ async function syncLocalFolder() {
         continue;
       }
       if (!lower.endsWith(".s")) continue;
+      if (!isSimpleDiskScriptName(name)) {
+        if (!LOCAL_BADNAME_WARNED) {
+          LOCAL_BADNAME_WARNED = true;
+          chatPost({ channel: "#kernel", from: "sys", kind: "system", body: "local sync: ignoring legacy names with prefixes." });
+        }
+        continue;
+      }
       const file = await entry.getFile();
       const text = await file.text();
       const base = localScriptNameFromFile(name);
       if (!base) continue;
+      const canonicalKey = canonicalScriptName(`${base}.s`, "local").canonical;
+      const prior = state.userScripts[canonicalKey];
       const secMatch = text.match(/@sec\\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i);
       const sec = secMatch ? secMatch[1].toUpperCase() : "FULLSEC";
-      const savedKey = upsertUserScript(`${base}.s`, sec, text, "local");
-      pathToScript.set(name, savedKey);
+      const savedKey = upsertUserScript(canonicalKey, sec, text, "local");
       seen.add(name);
-      const existing = state.userScripts[savedKey];
-      if (!existing || existing.code !== text || existing.sec !== sec) {
-        updated += 1;
-      } else {
-        unchanged += 1;
-      }
+      const entryState = state.userScripts[savedKey];
+      if (!prior) added += 1;
+      else if (!entryState || entryState.code !== text || entryState.sec !== sec) updated += 1;
+      else unchanged += 1;
       updateLocalFileMeta(name, file, savedKey);
     }
   } catch (err) {
@@ -1524,12 +1514,10 @@ async function syncLocalFolder() {
     } else {
       writeLine("Local sync complete: no .s files found.", "dim");
     }
-    await backfillLocalFolderFromDrive({ silent: true, prompt: true });
     return;
   }
   const suffix = scratchUpdated ? " (+scratch)" : "";
   writeLine(`Local sync complete: ${added} new, ${updated} updated, ${unchanged} unchanged.${suffix}`, "ok");
-  await backfillLocalFolderFromDrive({ silent: true, prompt: true });
   markDirty();
   updateHud();
 }
@@ -1542,7 +1530,7 @@ async function writeLocalMirrorFile(name, content) {
 }
 
 function shouldMirrorLocal() {
-  return !!(state.localSync && state.localSync.mirror);
+  return !!localFolderHandle;
 }
 
 function localMirrorFileName(locName, fileName) {
@@ -1552,14 +1540,7 @@ function localMirrorFileName(locName, fileName) {
 }
 
 function parseMirrorDownloadName(name) {
-  const fileName = String(name || "").trim();
-  if (!fileName) return null;
-  const locs = Object.keys(LOCS || {}).sort((a, b) => b.length - a.length);
-  const match = locs.find((loc) => fileName.startsWith(loc + "."));
-  if (!match) return null;
-  const rest = fileName.slice(match.length + 1);
-  if (!rest) return null;
-  return { loc: match, file: rest };
+  return null;
 }
 
 function removeDownloadedEntry(locName, fileName) {
@@ -1576,35 +1557,30 @@ function removeDownloadedEntry(locName, fileName) {
 }
 
 async function mirrorDownloadToLocalFolder(locName, fileName, entry) {
-  if (!shouldMirrorLocal()) return;
-  if (!localFolderHandle) {
-    writeLine("Local mirror enabled but no folder selected.", "warn");
-    return;
-  }
-  const perm = await ensureLocalFolderPermission(true);
-  if (!perm.ok) {
-    writeLine("Local mirror blocked: permission denied.", "warn");
-    await refreshLocalFolderUi();
-    return;
-  }
-
-  let content = "";
-  if (entry.type === "script") content = String((entry.script && entry.script.code) || "");
-  else if (entry.type === "text") content = String(entry.content || "");
-  else return;
-
-  const targetName = localMirrorFileName(locName, fileName);
-  try {
-    await writeLocalMirrorFile(targetName, content);
-    localFileMeta.set(targetName, { lastModified: Date.now(), size: content.length });
-  } catch (err) {
-    writeLine("Local mirror failed: " + (err && err.message ? err.message : "error"), "warn");
-  }
+  // Disabled: no export/mirror writes to disk.
+  return;
 }
 
 async function mirrorUserScriptToLocalFolder(scriptName, code) {
-  // Local disk files stay as simple names only; do not mirror in-game identities to disk.
-  return;
+  if (!supportsLocalFolder() || !window.isSecureContext) return;
+  if (!localFolderHandle) return;
+  const perm = await ensureLocalFolderPermission(true);
+  if (!perm.ok) {
+    writeLine("Local sync blocked: permission denied.", "warn");
+    await refreshLocalFolderUi();
+    return;
+  }
+  const key = String(scriptName || "").trim();
+  if (!key) return;
+  const base = scriptBaseFromKey(key) || "script";
+  const fileName = `${base}.s`;
+  const content = String(code || "");
+  try {
+    await writeLocalMirrorFile(fileName, content);
+    localFileMeta.set(fileName, { lastModified: Date.now(), size: content.length, scriptKey: key });
+  } catch (err) {
+    writeLine("Local script save failed: " + (err && err.message ? err.message : "error"), "warn");
+  }
 }
 
 async function mirrorScratchToLocalFolder(text) {
@@ -1683,8 +1659,13 @@ async function pollLocalFolderChanges() {
     if (!entry || entry.kind !== "file") continue;
     const name = String(entry.name || "");
     const lower = name.toLowerCase();
-    if (name === LOCAL_MIRROR_DIR || name.startsWith(`${LOCAL_MIRROR_DIR}/`)) continue;
-    if (isCanonicalScriptName(name)) continue;
+    if (!isSimpleDiskScriptName(name)) {
+      if (!LOCAL_BADNAME_WARNED) {
+        LOCAL_BADNAME_WARNED = true;
+        chatPost({ channel: "#kernel", from: "sys", kind: "system", body: "local sync: ignoring legacy names with prefixes." });
+      }
+      continue;
+    }
     const isScratch = lower === LOCAL_SCRATCH_FILE;
     seen.add(name);
 
@@ -1700,42 +1681,19 @@ async function pollLocalFolderChanges() {
     }
 
     const text = await file.text();
-    const mirror = parseMirrorDownloadName(name);
-    if (mirror && state.drive && state.drive[driveId(mirror.loc, mirror.file)]) {
-      const driveIdKey = driveId(mirror.loc, mirror.file);
-      const driveEntry = state.drive[driveIdKey];
-      if (driveEntry.type !== "script" && driveEntry.type !== "text") continue;
-      const nextContent = String(text || "");
-      if (driveEntry.type === "script" && driveEntry.script && driveEntry.script.name && state.kit) {
-        state.kit[driveEntry.script.name] = {
-          owner: "kit",
-          name: driveEntry.script.name,
-          sec: driveEntry.script && driveEntry.script.sec ? driveEntry.script.sec : "FULLSEC",
-          code: nextContent,
-        };
-      }
-      updateDriveContent(driveIdKey, nextContent);
-      scriptUpdates += 1;
-      continue;
-    }
     const isScript = lower.endsWith(".s");
     if (!isScript) continue;
     const scriptName = localScriptNameFromFile(name);
     if (!scriptName) continue;
     if (!state.handle) continue;
+    const canonicalKey = canonicalScriptName(`${scriptName}.s`, "local").canonical;
     const secMatch = text.match(/@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i);
     const sec = secMatch ? secMatch[1].toUpperCase() : "FULLSEC";
-    const existing = findUserScript(scriptName);
-    const existingCode = existing && existing.script && typeof existing.script.code === "string" ? existing.script.code : null;
-    const savedKey = upsertUserScript(scriptName, sec, text, currentZone());
+    const existing = state.userScripts[canonicalKey];
+    const savedKey = upsertUserScript(canonicalKey, sec, text, "local");
     updateLocalFileMeta(name, file, savedKey);
-    const changed = !existing || existingCode !== text || existing.script.sec !== sec;
+    const changed = !existing || existing.code !== text || existing.sec !== sec;
     if (changed) {
-      const driveName = savedKey;
-      const driveKey = driveId("local", driveName);
-      const meta = { type: "script", script: { name: savedKey, sec, code: text } };
-      if (driveHas(driveKey)) updateDriveContent(driveKey, text, meta);
-      else storeDriveCopy("local", driveName, meta);
       scriptUpdates += 1;
     }
   }
@@ -3614,6 +3572,67 @@ const LOCS = {
         answer: () => trainingKey2(),
         hint: "Key 2 is the word in primer.dat (word=...).",
       },
+      "grid.jobs": {
+        type: "text",
+        content: [
+          "GRID JOB BOARD",
+          "Switchboard: \"Prove you can read without guessing.\"",
+          "Archivist:  \"Checksum is a mood. Learn it.\"",
+          "Weaver:     \"Our marks need people who finish things.\"",
+        ].join("\n"),
+      },
+    },
+  },
+  "island.echo": {
+    title: "ISLAND.ECHO",
+    desc: [
+      "A narrow repeater that only boots after you clear the lab locks.",
+      "The net thanks you in static, then teaches you how to listen.",
+    ],
+    requirements: { flags: ["tutorial_training_done"] },
+    locks: [],
+    links: ["island.grid", "home.hub"],
+    files: {
+      "echo.log": {
+        type: "text",
+        content: [
+          "ISLAND ECHO",
+          "The Drift whispers back when you answer honestly.",
+          "",
+          "Notes:",
+          "- Trust is heat. Breach carefully to keep routes open.",
+          "- Wait cools heat. trust.anchor cools faster.",
+          "- Glitched fragments will start appearing once you leave the island.",
+        ].join("\n"),
+      },
+      "fragment.alpha": {
+        type: "text",
+        content: [
+          "FRAGMENT.ALPHA",
+          "Signal clue: FRACTURE",
+          "The Drift cracked here first. Replace the missing glyphs when you decode other fragments.",
+        ].join("\n"),
+      },
+    },
+  },
+  "training.node": {
+    title: "LAB/TRAINING",
+    desc: [
+      "A sandboxed node with a single purpose: teach you to compute.",
+      "No prize. Just competence.",
+    ],
+    requirements: {},
+    locks: [
+      {
+        prompt: "LOCK: provide handle (KEY1)",
+        answer: () => trainingKey1(),
+        hint: "Key 1 is your handle. Script: ctx.print(ctx.handle()).",
+      },
+      {
+        prompt: "LOCK: provide word (KEY2)",
+        answer: () => trainingKey2(),
+        hint: "Key 2 is the word in primer.dat (word=...).",
+      },
       {
         prompt: "LOCK: provide checksum (KEY3, hex3)",
         answer: () => trainingKey3(),
@@ -3727,61 +3746,6 @@ const LOCS = {
       },
       // Early behavioral fork (profit): fast GC with heat + watcher pressure. Safe stumble, no lockouts.
       "flash.s": {
-        type: "script",
-        script: {
-          name: "flash",
-          sec: "MIDSEC",
-          code: [
-            "// @sec MIDSEC",
-            "const fast = ctx.flagged('flash_fast');",
-            "const rewarded = ctx.flagged('flash_paid');",
-            "const gc = rewarded ? 12 : 25;",
-            "// Profit path: quick GC with heat + watcher attention. Safe stumble, not a lock.",
-            "ctx.gc(gc);",
-            "ctx.print(`GC +${gc}`);",
-            "ctx.flag('flash_paid');",
-            "ctx.adjustHeat(2, 'flash deal');",
-            "ctx.behavior('aggressive');",
-            "ctx.behavior('noise');",
-            "if (fast) { ctx.traceBump('flash repeat'); ctx.print('watchers narrow eyes'); }",
-            "ctx.flag('flash_fast');",
-          ].join("\n"),
-        },
-        content: [
-          "/* flash.s */",
-          "function main(ctx,args){",
-          "  // Quick scrap flip. Pays out fast, but the signal runs hot.",
-          "}",
-        ].join("\n"),
-      },
-      // Early behavioral fork (observation): patience yields tone/lore instead of GC; heat stays low.
-      "listen.s": {
-        type: "script",
-        script: {
-          name: "listen",
-          sec: "LOWSEC",
-          code: [
-            "// @sec LOWSEC",
-            "const calm = ctx.lastWaitMs && ctx.lastWaitMs() > 2500;",
-            "const first = !ctx.flagged('listen_once');",
-            "// Observation path: slower, lower heat, reveals tone instead of GC.",
-            "if (calm) ctx.coolHeat(1, 'listen');",
-            "ctx.behavior('patient');",
-            "ctx.behavior('careful');",
-            "ctx.flag('listen_once');",
-            "ctx.print(calm ? 'static thins; a quiet log surfaces.' : 'static steady; hold longer to hear more.');",
-            "if (first) ctx.post('#kernel','watcher','stillness logged; some routes stay loose when you linger.');",
-            "if (ctx.corruptionLevel() >= 2 && calm) ctx.print('█ree-line hum traced across the mesh.');",
-          ].join("\n"),
-        },
-        content: [
-          "/* listen.s */",
-          "function main(ctx,args){",
-          "  // Stand still, let the mesh talk back.",
-          "}",
-        ].join("\n"),
-      },
-      "sniffer.s": {
         type: "script",
         script: {
           name: "flash",
@@ -5421,10 +5385,6 @@ async function delCommand(args) {
       try {
         await localFolderHandle.removeEntry(name);
         removed.push(name);
-        const mirror = parseMirrorDownloadName(name);
-        if (mirror) {
-          removeDownloadedEntry(mirror.loc, mirror.file);
-        }
         localFileMeta.delete(name);
       } catch {}
     }
@@ -6424,6 +6384,114 @@ function stabilizeGlitch() {
 if (state.wait.streak >= 3 && Math.random() < 0.35) {
   writeLine("passive scan catches movement", "warn");
   failBreach();
+}
+
+function pingCommand(args) {
+  const region = state.currentRegion || (state.region && state.region.current);
+  if (region !== "introNet") {
+    writeLine("Ping drifts out; nothing notable answers.", "dim");
+    return;
+  }
+  islandPing(args);
+}
+
+function islandPing(args) {
+  const loc = state.loc || "";
+  // Safe failure: a tempting island-only button that raises heat, teaching risk without lasting punishment.
+  if (loc !== "island.grid" && loc !== "island.echo" && loc !== "home.hub") {
+    writeLine("The island beacon only hears pings nearby.", "dim");
+    return;
+  }
+  const mem = introMemoryState();
+  const now = Date.now();
+  const fast = now - (Number(mem.lastPingAt) || 0) < 2500;
+  mem.lastPingAt = now;
+  mem.pingCount = (Number(mem.pingCount) || 0) + 1;
+  mem.pingStreak = fast ? (Number(mem.pingStreak) || 0) + 1 : 1;
+
+  if (mem.pingCount === 1) writeLine("Beacon answers with a soft tone. Feels harmless.", "dim");
+  else if (fast) writeLine("Beacon heats up; echoes sharpen.", "warn");
+  else writeLine("Beacon hums warmer than before.", "warn");
+
+  // Designed stumble: spamming the beacon is tempting, but it raises heat safely to teach consequences.
+  trustAdjustHeat(1, "island ping");
+
+  if (mem.pingStreak >= 2) {
+    const gained = state.trace < state.traceMax ? 1 : 0;
+    if (gained > 0) {
+      state.trace += gained;
+      introTraceTeach("island ping");
+      watcherTraceReact("island ping");
+      writeLine(`TRACE +${gained} (${state.trace}/${state.traceMax})`, "warn");
+    }
+  }
+  if (mem.pingCount >= 2 && trustHeat() > 0) state.flags.add("intro_heat_memory"); // Trust as memory: later tone reacts.
+  markDirty();
+}
+
+function meshBridgeCommand() {
+  RegionManager.bootstrap({ silent: true });
+  if (meshBridgeActive()) {
+    writeLine("bridge already holds toward the mesh.", "dim");
+    return;
+  }
+
+  state.flags.add(MESH_BRIDGE_FLAG);
+  const targetRegion = "publicNet";
+  const def = REGION_DEFS.find((r) => r.id === targetRegion);
+  if (!state.region || typeof state.region !== "object") {
+    state.region = { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() };
+  }
+  if (!(state.region.unlocked instanceof Set)) state.region.unlocked = new Set(state.region.unlocked || []);
+  if (!(state.region.visited instanceof Set)) state.region.visited = new Set(state.region.visited || []);
+  if (!(state.region.pending instanceof Set)) state.region.pending = new Set(state.region.pending || []);
+  if (def) {
+    state.region.unlocked.add(targetRegion);
+    def.nodes.forEach((node) => state.region.pending.delete(node));
+    def.nodes.forEach((node) => {
+      if (!state.discovered.has(node)) state.discovered.add(node);
+    });
+  } else {
+    state.region.unlocked.add(targetRegion);
+  }
+  state.region.current = targetRegion;
+  state.currentRegion = targetRegion;
+  state.region.visited.add(targetRegion);
+  setZone(zoneForRegion(targetRegion));
+  onRegionEnter(def || { id: targetRegion });
+  writeLine("bridge settles; mesh hum turns distant.", "dim");
+  markDirty();
+  updateHud();
+}
+
+function stabilizeGlitch() {
+  if (!state.flags.has("glitch_fragment_seen")) {
+    writeLine("No unstable fragment nearby.", "dim");
+    return;
+  }
+  if (state.flags.has("glitch_exploiter")) {
+    writeLine("Signal remembers you pulled it apart.", "warn");
+    return;
+  }
+  if (state.flags.has("glitch_stabilizer")) {
+    writeLine("Thread already steadied.", "dim");
+    return;
+  }
+  state.flags.add("glitch_stabilizer");
+  state.flags.add("glitch_path_memory");
+  setCorruptionLevel(Math.max(0, corruptionLevel() - 1));
+  trustCoolDown(1, "glitch stabilize");
+  chatPost({ channel: "#kernel", from: "watcher", body: "you steady the crack. some lines stay readable now." });
+  // Future repair hook: stabilized fragments could be rebuilt later without re-parsing lore.
+  markDirty();
+}
+
+  writeLine("still hot (don't spam wait)", "warn");
+  // Light punishment: repeated spam can raise trace a bit.
+  if (state.wait.streak >= 3 && Math.random() < 0.35) {
+    writeLine("passive scan catches movement", "warn");
+    failBreach();
+  }
 }
 
 function pingCommand(args) {
