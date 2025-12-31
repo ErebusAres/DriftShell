@@ -4498,402 +4498,6 @@ const LOCS = {
       },
     },
   },
-  "glitch.cache": {
-    title: "GLITCH.CACHE",
-    desc: [
-      "A cache of corrupted text frames stitched together by the Weavers.",
-      "Every file has holes. Your job is to repair the chant.",
-    ],
-    requirements: { flags: ["slipper_signal"], items: ["weaver.mark"], trust: 2 },
-    locks: [
-      {
-        prompt: "LOCK: present weaver.mark",
-        answer: "weaver.mark",
-        hint: "Download weaver.mark from weaver.den.",
-      },
-    ],
-    links: ["slipper.hole", "core.relic"],
-    files: {
-      "glitch.map": {
-        type: "text",
-        content: [
-          "GLITCH MAP",
-          "Fragments to gather:",
-          "- fragment.alpha (island.echo)",
-          "- fragment.beta   (cache)",
-          "- fragment.gamma  (cache)",
-          "- fragment.delta  (cache)",
-          "",
-          "Each fragment hides a word. Replace missing glyphs (█) with the obvious letter after decoding.",
-          "The final chant opens the rogue core.",
-        ].join("\n"),
-      },
-      "fragment.beta": {
-        type: "text",
-        cipher: true,
-        content: `ZVE${GLITCH_GLYPH}BE`,
-      },
-      "fragment.gamma": {
-        type: "text",
-        cipher: true,
-        content: `RZO${GLITCH_GLYPH}E`,
-      },
-      "fragment.delta": {
-        type: "text",
-        cipher: true,
-        content: `FGV${GLITCH_GLYPH}Y`,
-      },
-      "chant.txt": {
-        type: "text",
-        content: [
-          "GLITCH CHANT (BROKEN)",
-          "??? THE EMBER STILL THREAD",
-          "",
-          "Fill the missing word by repairing the fragments.",
-        ].join("\n"),
-      },
-      "stitch.s": {
-        type: "script",
-        script: {
-          name: "stitch",
-          sec: "MIDSEC",
-          code: [
-            "// @sec MIDSEC",
-            "const frags = ['fragment.alpha','fragment.beta','fragment.gamma','fragment.delta'];",
-            "const words = frags.map((f) => (ctx.read(f) || '').toUpperCase());",
-            "const repaired = words.map((w) => w.replace(/█/g, '?').replace(/\\s+/g, '').replace(/[^A-Z?]/g,''));",
-            "const chant = `${repaired[1] || '???'} THE ${repaired[2] || 'EMBER'} ${repaired[3] || 'STILL'} THREAD`;",
-            "ctx.print('Fragments: ' + repaired.join(' / '));",
-            "ctx.print('Chant: ' + chant.trim());",
-            "if (!chant.includes('?')) {",
-            "  ctx.flag('glitch_phrase_ready');",
-            "  ctx.print('Chant locked. Rogue core will listen.');",
-            "} else {",
-            "  ctx.print('Fill missing glyphs in your fragment files to finalize the chant.', 'warn');",
-            "}",
-          ].join("\n"),
-        },
-        content: [
-          "/* stitch.s */",
-          "function main(ctx,args){",
-          "  // Read fragment.* files from your drive and reconstruct the chant.",
-          "}",
-        ].join("\n"),
-      },
-    },
-  },
-  "rogue.core": {
-    title: "ROGUE.CORE",
-    desc: [
-      "A rogue AI kernel adapted from the relic. It mirrors your handle back at you.",
-      "Locks adapt to your trust level and your ability to repair glitches.",
-    ],
-    requirements: { flags: ["touched_relic", "glitch_phrase_ready", "forked"], items: ["relay.shard", "relic.key"], trust: 3 },
-    locks: [
-      {
-        prompt: "ROGUE: checksum(payload|HANDLE=<you>) (hex3)",
-        answer: () => expectedForChecksumPayload(ROGUE_PAYLOAD),
-        hint: "Read rogue.seed. Compute checksum like the primer.",
-      },
-      {
-        prompt: "ROGUE: repaired chant",
-        answer: "MIRROR THE EMBER STILL THREAD",
-        hint: "Collect and repair fragments in glitch.cache.",
-      },
-      {
-        prompt: "ROGUE: confirm trust tier (LEVEL3)",
-        answer: "LEVEL3",
-        hint: "Keep trust steady. Wait or anchor if heat spikes.",
-      },
-    ],
-    links: ["core.relic"],
-    files: {
-      "rogue.seed": {
-        type: "text",
-        content: [
-          "ROGUE SEED",
-          "payload=" + ROGUE_PAYLOAD,
-          "Expected: checksum(payload|HANDLE=<you>) -> hex3",
-          "The rogue mirrors you. Keep trust at level 3+ or it ignores you.",
-        ].join("\n"),
-      },
-      "rogue.log": {
-        type: "text",
-        content: [
-          "ROGUE CORE",
-          "Phase 1: checksums keep it honest.",
-          "Phase 2: chants remind it of the Drift.",
-          "Phase 3: trust proves you belong here.",
-          "",
-          "Fail any phase and trace spikes hard.",
-        ].join("\n"),
-      },
-    },
-  },
-  "glitch.cache": {
-    title: "GLITCH.CACHE",
-    desc: [
-      "A cache of corrupted text frames stitched together by the Weavers.",
-      "Every file has holes. Your job is to repair the chant.",
-    ],
-    requirements: { flags: ["slipper_signal"], items: ["weaver.mark"], trust: 2 },
-    locks: [
-      {
-        prompt: "LOCK: present weaver.mark",
-        answer: "weaver.mark",
-        hint: "Download weaver.mark from weaver.den.",
-      },
-    ],
-    links: ["slipper.hole", "core.relic"],
-    files: {
-      "glitch.map": {
-        type: "text",
-        content: [
-          "GLITCH MAP",
-          "Fragments to gather:",
-          "- fragment.alpha (island.echo)",
-          "- fragment.beta   (cache)",
-          "- fragment.gamma  (cache)",
-          "- fragment.delta  (cache)",
-          "",
-          "Each fragment hides a word. Replace missing glyphs (█) with the obvious letter after decoding.",
-          "The final chant opens the rogue core.",
-        ].join("\n"),
-      },
-      "fragment.beta": {
-        type: "text",
-        cipher: true,
-        content: `ZVE${GLITCH_GLYPH}BE`,
-      },
-      "fragment.gamma": {
-        type: "text",
-        cipher: true,
-        content: `RZO${GLITCH_GLYPH}E`,
-      },
-      "fragment.delta": {
-        type: "text",
-        cipher: true,
-        content: `FGV${GLITCH_GLYPH}Y`,
-      },
-      "chant.txt": {
-        type: "text",
-        content: [
-          "GLITCH CHANT (BROKEN)",
-          "??? THE EMBER STILL THREAD",
-          "",
-          "Fill the missing word by repairing the fragments.",
-        ].join("\n"),
-      },
-      "stitch.s": {
-        type: "script",
-        script: {
-          name: "stitch",
-          sec: "MIDSEC",
-          code: [
-            "// @sec MIDSEC",
-            "const frags = ['fragment.alpha','fragment.beta','fragment.gamma','fragment.delta'];",
-            "const words = frags.map((f) => (ctx.read(f) || '').toUpperCase());",
-            "const repaired = words.map((w) => w.replace(/█/g, '?').replace(/\\s+/g, '').replace(/[^A-Z?]/g,''));",
-            "const chant = `${repaired[1] || '???'} THE ${repaired[2] || 'EMBER'} ${repaired[3] || 'STILL'} THREAD`;",
-            "ctx.print('Fragments: ' + repaired.join(' / '));",
-            "ctx.print('Chant: ' + chant.trim());",
-            "if (!chant.includes('?')) {",
-            "  ctx.flag('glitch_phrase_ready');",
-            "  ctx.print('Chant locked. Rogue core will listen.');",
-            "} else {",
-            "  ctx.print('Fill missing glyphs in your fragment files to finalize the chant.', 'warn');",
-            "}",
-          ].join("\n"),
-        },
-        content: [
-          "/* stitch.s */",
-          "function main(ctx,args){",
-          "  // Read fragment.* files from your drive and reconstruct the chant.",
-          "}",
-        ].join("\n"),
-      },
-    },
-  },
-  "rogue.core": {
-    title: "ROGUE.CORE",
-    desc: [
-      "A rogue AI kernel adapted from the relic. It mirrors your handle back at you.",
-      "Locks adapt to your trust level and your ability to repair glitches.",
-    ],
-    requirements: { flags: ["touched_relic", "glitch_phrase_ready", "forked"], items: ["relay.shard", "relic.key"], trust: 3 },
-    locks: [
-      {
-        prompt: "ROGUE: checksum(payload|HANDLE=<you>) (hex3)",
-        answer: () => expectedForChecksumPayload(ROGUE_PAYLOAD),
-        hint: "Read rogue.seed. Compute checksum like the primer.",
-      },
-      {
-        prompt: "ROGUE: repaired chant",
-        answer: "MIRROR THE EMBER STILL THREAD",
-        hint: "Collect and repair fragments in glitch.cache.",
-      },
-      {
-        prompt: "ROGUE: confirm trust tier (LEVEL3)",
-        answer: "LEVEL3",
-        hint: "Keep trust steady. Wait or anchor if heat spikes.",
-      },
-    ],
-    links: ["core.relic"],
-    files: {
-      "rogue.seed": {
-        type: "text",
-        content: [
-          "ROGUE SEED",
-          "payload=" + ROGUE_PAYLOAD,
-          "Expected: checksum(payload|HANDLE=<you>) -> hex3",
-          "The rogue mirrors you. Keep trust at level 3+ or it ignores you.",
-        ].join("\n"),
-      },
-      "rogue.log": {
-        type: "text",
-        content: [
-          "ROGUE CORE",
-          "Phase 1: checksums keep it honest.",
-          "Phase 2: chants remind it of the Drift.",
-          "Phase 3: trust proves you belong here.",
-          "",
-          "Fail any phase and trace spikes hard.",
-        ].join("\n"),
-      },
-    },
-  },
-  "glitch.cache": {
-    title: "GLITCH.CACHE",
-    desc: [
-      "A cache of corrupted text frames stitched together by the Weavers.",
-      "Every file has holes. Your job is to repair the chant.",
-    ],
-    requirements: { flags: ["slipper_signal"], items: ["weaver.mark"], trust: 2 },
-    locks: [
-      {
-        prompt: "LOCK: present weaver.mark",
-        answer: "weaver.mark",
-        hint: "Download weaver.mark from weaver.den.",
-      },
-    ],
-    links: ["slipper.hole", "core.relic"],
-    files: {
-      "glitch.map": {
-        type: "text",
-        content: [
-          "GLITCH MAP",
-          "Fragments to gather:",
-          "- fragment.alpha (island.echo)",
-          "- fragment.beta   (cache)",
-          "- fragment.gamma  (cache)",
-          "- fragment.delta  (cache)",
-          "",
-          "Each fragment hides a word. Replace missing glyphs (█) with the obvious letter after decoding.",
-          "The final chant opens the rogue core.",
-        ].join("\n"),
-      },
-      "fragment.beta": {
-        type: "text",
-        cipher: true,
-        content: `ZVE${GLITCH_GLYPH}BE`,
-      },
-      "fragment.gamma": {
-        type: "text",
-        cipher: true,
-        content: `RZO${GLITCH_GLYPH}E`,
-      },
-      "fragment.delta": {
-        type: "text",
-        cipher: true,
-        content: `FGV${GLITCH_GLYPH}Y`,
-      },
-      "chant.txt": {
-        type: "text",
-        content: [
-          "GLITCH CHANT (BROKEN)",
-          "??? THE EMBER STILL THREAD",
-          "",
-          "Fill the missing word by repairing the fragments.",
-        ].join("\n"),
-      },
-      "stitch.s": {
-        type: "script",
-        script: {
-          name: "stitch",
-          sec: "MIDSEC",
-          code: [
-            "// @sec MIDSEC",
-            "const frags = ['fragment.alpha','fragment.beta','fragment.gamma','fragment.delta'];",
-            "const words = frags.map((f) => (ctx.read(f) || '').toUpperCase());",
-            "const repaired = words.map((w) => w.replace(/█/g, '?').replace(/\\s+/g, '').replace(/[^A-Z?]/g,''));",
-            "const chant = `${repaired[1] || '???'} THE ${repaired[2] || 'EMBER'} ${repaired[3] || 'STILL'} THREAD`;",
-            "ctx.print('Fragments: ' + repaired.join(' / '));",
-            "ctx.print('Chant: ' + chant.trim());",
-            "if (!chant.includes('?')) {",
-            "  ctx.flag('glitch_phrase_ready');",
-            "  ctx.print('Chant locked. Rogue core will listen.');",
-            "} else {",
-            "  ctx.print('Fill missing glyphs in your fragment files to finalize the chant.', 'warn');",
-            "}",
-          ].join("\n"),
-        },
-        content: [
-          "/* stitch.s */",
-          "function main(ctx,args){",
-          "  // Read fragment.* files from your drive and reconstruct the chant.",
-          "}",
-        ].join("\n"),
-      },
-    },
-  },
-  "rogue.core": {
-    title: "ROGUE.CORE",
-    desc: [
-      "A rogue AI kernel adapted from the relic. It mirrors your handle back at you.",
-      "Locks adapt to your trust level and your ability to repair glitches.",
-    ],
-    requirements: { flags: ["touched_relic", "glitch_phrase_ready", "forked"], items: ["relay.shard", "relic.key"], trust: 3 },
-    locks: [
-      {
-        prompt: "ROGUE: checksum(payload|HANDLE=<you>) (hex3)",
-        answer: () => expectedForChecksumPayload(ROGUE_PAYLOAD),
-        hint: "Read rogue.seed. Compute checksum like the primer.",
-      },
-      {
-        prompt: "ROGUE: repaired chant",
-        answer: "MIRROR THE EMBER STILL THREAD",
-        hint: "Collect and repair fragments in glitch.cache.",
-      },
-      {
-        prompt: "ROGUE: confirm trust tier (LEVEL3)",
-        answer: "LEVEL3",
-        hint: "Keep trust steady. Wait or anchor if heat spikes.",
-      },
-    ],
-    links: ["core.relic"],
-    files: {
-      "rogue.seed": {
-        type: "text",
-        content: [
-          "ROGUE SEED",
-          "payload=" + ROGUE_PAYLOAD,
-          "Expected: checksum(payload|HANDLE=<you>) -> hex3",
-          "The rogue mirrors you. Keep trust at level 3+ or it ignores you.",
-        ].join("\n"),
-      },
-      "rogue.log": {
-        type: "text",
-        content: [
-          "ROGUE CORE",
-          "Phase 1: checksums keep it honest.",
-          "Phase 2: chants remind it of the Drift.",
-          "Phase 3: trust proves you belong here.",
-          "",
-          "Fail any phase and trace spikes hard.",
-        ].join("\n"),
-      },
-    },
-  },
 };
 
 function getLoc(name) {
@@ -6200,6 +5804,16 @@ function waitTick() {
   writeLine("...waiting...", "dim");
 
   if (!fast) {
+    if (state.breach && state.breach.loc === "core.relic" && state.breach.mirrorMode === "rush") {
+      // Mirror: patient players forced to move; waiting too long adds pressure.
+      if (state.breach.mirrorDeadline && Date.now() > state.breach.mirrorDeadline) {
+        state.breach.mirrorPenalty = true;
+        state.flags.add("mirror_refused");
+        profiledTraceRise(1, "mirror linger");
+        trustAdjustHeat(1, "mirror linger");
+        state.breach.mirrorDeadline = Date.now() + 7000;
+      }
+    }
     if (state.trace > 0) state.trace -= 1;
     if (state.trace === 0) writeLine("trace is cold", "ok");
     trustCoolDown(TRUST_COOLDOWN_ON_WAIT, "wait");
@@ -8097,6 +7711,21 @@ function startBreach(locName) {
       writeLine("WARDEN PULSE :: trace rising", "warn");
       failBreach();
     }, pulseMs);
+
+    // Mirror encounter: push players out of their dominant cadence for this relic breach.
+    const dom = dominantBehavior();
+    const mirror =
+      (locked === "noise" || locked === "aggressive" || dom === "noise" || dom === "aggressive" || exploitTilt) ? "stillness" : "rush";
+    state.breach.mirrorMode = mirror;
+    state.breach.mirrorDeadline = Date.now() + (mirror === "rush" ? 8500 : 0);
+    state.breach.lastActionAt = Date.now();
+    state.breach.mirrorAdapted = false;
+    state.breach.mirrorPenalty = false;
+    if (mirror === "stillness") {
+      chatPost({ channel: "#kernel", from: "watcher", body: "you don’t usually wait." });
+    } else {
+      chatPost({ channel: "#kernel", from: "watcher", body: "you linger; the signal decays fast." });
+    }
   }
 
   writeLine(loc.locks[0].prompt, "warn");
@@ -8157,6 +7786,33 @@ function unlockAttempt(answer) {
     writeLine("No active breach.", "warn");
     return;
   }
+  if (state.breach.loc === "core.relic" && state.breach.mirrorMode === "stillness") {
+    const now = Date.now();
+    const delta = now - (Number(state.breach.lastActionAt) || 0);
+    if (delta < 2500) {
+      state.breach.mirrorPenalty = true;
+      state.flags.add("mirror_refused");
+      profiledTraceRise(1, "mirror haste");
+      trustAdjustHeat(1, "mirror haste");
+      writeLine("warden mirrors your haste.", "warn");
+    } else if (delta >= 3200 && !state.breach.mirrorAdapted) {
+      state.breach.mirrorAdapted = true;
+      state.flags.add("mirror_adapted");
+    }
+    state.breach.lastActionAt = now;
+  }
+  if (state.breach.loc === "core.relic" && state.breach.mirrorMode === "rush") {
+    const now = Date.now();
+    if (state.breach.mirrorDeadline && now > state.breach.mirrorDeadline) {
+      state.breach.mirrorPenalty = true;
+      state.flags.add("mirror_refused");
+      profiledTraceRise(1, "mirror linger");
+      trustAdjustHeat(1, "mirror linger");
+      writeLine("signal frays while you linger.", "warn");
+      state.breach.mirrorDeadline = now + 7000;
+    }
+    state.breach.lastActionAt = now;
+  }
   const pressure = state.breach.pressure;
   const loc = getLoc(state.breach.loc);
   const lock = loc.locks[state.breach.index];
@@ -8178,6 +7834,13 @@ function unlockAttempt(answer) {
     writeLine("sys::lock.cleared", "trust");
     if (state.trace === 0 && trustHeat() === 0) recordRogueBehavior("careful");
     state.breach.index += 1;
+    if (state.breach.loc === "core.relic" && state.breach.mirrorMode === "rush") {
+      state.breach.mirrorDeadline = Date.now() + 8000;
+      if (!state.breach.mirrorAdapted) {
+        state.breach.mirrorAdapted = true;
+        state.flags.add("mirror_adapted");
+      }
+    }
     if (state.breach.index >= loc.locks.length) {
       const unlockedLoc = state.breach.loc;
       writeLine("STACK CLEARED. ACCESS OPEN.", "ok");
