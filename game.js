@@ -4676,14 +4676,23 @@ function listMarks() {
 
 function listLocs() {
   writeLine("LOCATIONS", "header");
+  RegionManager.bootstrap({ silent: true });
   Array.from(state.discovered)
     .sort()
     .forEach((locName) => {
       if (!RegionManager.isNodeVisible(locName)) return;
       const node = getLoc(locName);
-      const unlocked = state.unlocked.has(locName) ? "listening" : "silent";
       const title = node ? node.title : "UNKNOWN";
-      writeLine(`${locName} [${unlocked}] :: ${title}`, "dim");
+      const reqOk = requirementsMet(locName);
+      const noLocks = !!(node && Array.isArray(node.locks) && node.locks.length === 0);
+      const unlocked = state.unlocked.has(locName) || noLocks;
+      const openNow = reqOk && unlocked;
+      const tags = [openNow ? "open" : "locked"];
+      if (!openNow) {
+        if (!reqOk) tags.push("req");
+        else if (!state.unlocked.has(locName) && node && Array.isArray(node.locks) && node.locks.length) tags.push("breach");
+      }
+      writeLine(`${locName} [${tags.join(", ")}] :: ${title}`, "dim");
     });
 }
 
