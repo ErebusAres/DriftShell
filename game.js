@@ -1684,7 +1684,7 @@ async function pollLocalFolderChanges() {
 function writeLine(text, kind) {
   const line = document.createElement("div");
   line.className = `line${kind ? " " + kind : ""}`;
-  renderTerminalRich(line, String(text));
+  renderTerminalRich(line, applyEscalationTextEffects(String(text)));
   screen.appendChild(line);
   screen.scrollTop = screen.scrollHeight;
 }
@@ -5864,13 +5864,42 @@ function waitTick() {
     markDirty();
     return;
   }
-
-  writeLine("still hot (don't spam wait)", "warn");
-  // Light punishment: repeated spam can raise trace a bit.
-  if (state.wait.streak >= 3 && Math.random() < 0.35) {
-    writeLine("passive scan catches movement", "warn");
-    failBreach();
+  if (state.flags.has("glitch_stabilizer")) {
+    writeLine("Thread already steadied.", "dim");
+    return;
   }
+  state.flags.add("glitch_stabilizer");
+  state.flags.add("glitch_path_memory");
+  setCorruptionLevel(Math.max(0, corruptionLevel() - 1));
+  trustCoolDown(1, "glitch stabilize");
+  chatPost({ channel: "#kernel", from: "watcher", body: "you steady the crack. some lines stay readable now." });
+  // Future repair hook: stabilized fragments could be rebuilt later without re-parsing lore.
+  markDirty();
+}
+
+function spliceGlitch() {
+  if (!state.flags.has("glitch_fragment_seen")) {
+    writeLine("Nothing to splice.", "dim");
+    return;
+  }
+  if (state.flags.has("glitch_stabilizer")) {
+    writeLine("You already anchored the thread.", "warn");
+    return;
+  }
+  if (state.flags.has("glitch_exploiter")) {
+    writeLine("The fragment is already bleeding power.", "dim");
+    return;
+  }
+  state.flags.add("glitch_exploiter");
+  state.flags.add("glitch_path_memory");
+  state.gc = Math.max(0, (Number(state.gc) || 0) + 25);
+  trustAdjustHeat(2, "glitch splice");
+  profiledTraceRise(1, "glitch splice");
+  setCorruptionLevel(Math.min(3, corruptionLevel() + 1));
+  chatPost({ channel: "#kernel", from: "rogue", body: "you pull the crack wider. residue banks, eyes notice." });
+  // Future exploit hook: amplified corruption could be weaponized later.
+  maybeLockTrustProfile("glitch");
+  markDirty();
 }
 
 function pingCommand(args) {
