@@ -3572,67 +3572,6 @@ const LOCS = {
         answer: () => trainingKey2(),
         hint: "Key 2 is the word in primer.dat (word=...).",
       },
-      "grid.jobs": {
-        type: "text",
-        content: [
-          "GRID JOB BOARD",
-          "Switchboard: \"Prove you can read without guessing.\"",
-          "Archivist:  \"Checksum is a mood. Learn it.\"",
-          "Weaver:     \"Our marks need people who finish things.\"",
-        ].join("\n"),
-      },
-    },
-  },
-  "island.echo": {
-    title: "ISLAND.ECHO",
-    desc: [
-      "A narrow repeater that only boots after you clear the lab locks.",
-      "The net thanks you in static, then teaches you how to listen.",
-    ],
-    requirements: { flags: ["tutorial_training_done"] },
-    locks: [],
-    links: ["island.grid", "home.hub"],
-    files: {
-      "echo.log": {
-        type: "text",
-        content: [
-          "ISLAND ECHO",
-          "The Drift whispers back when you answer honestly.",
-          "",
-          "Notes:",
-          "- Trust is heat. Breach carefully to keep routes open.",
-          "- Wait cools heat. trust.anchor cools faster.",
-          "- Glitched fragments will start appearing once you leave the island.",
-        ].join("\n"),
-      },
-      "fragment.alpha": {
-        type: "text",
-        content: [
-          "FRAGMENT.ALPHA",
-          "Signal clue: FRACTURE",
-          "The Drift cracked here first. Replace the missing glyphs when you decode other fragments.",
-        ].join("\n"),
-      },
-    },
-  },
-  "training.node": {
-    title: "LAB/TRAINING",
-    desc: [
-      "A sandboxed node with a single purpose: teach you to compute.",
-      "No prize. Just competence.",
-    ],
-    requirements: {},
-    locks: [
-      {
-        prompt: "LOCK: provide handle (KEY1)",
-        answer: () => trainingKey1(),
-        hint: "Key 1 is your handle. Script: ctx.print(ctx.handle()).",
-      },
-      {
-        prompt: "LOCK: provide word (KEY2)",
-        answer: () => trainingKey2(),
-        hint: "Key 2 is the word in primer.dat (word=...).",
-      },
       {
         prompt: "LOCK: provide checksum (KEY3, hex3)",
         answer: () => trainingKey3(),
@@ -6379,13 +6318,6 @@ function stabilizeGlitch() {
   markDirty();
 }
 
-  writeLine("still hot (don't spam wait)", "warn");
-  // Light punishment: repeated spam can raise trace a bit.
-if (state.wait.streak >= 3 && Math.random() < 0.35) {
-  writeLine("passive scan catches movement", "warn");
-  failBreach();
-}
-
 function pingCommand(args) {
   const region = state.currentRegion || (state.region && state.region.current);
   if (region !== "introNet") {
@@ -6486,14 +6418,6 @@ function stabilizeGlitch() {
   markDirty();
 }
 
-  writeLine("still hot (don't spam wait)", "warn");
-  // Light punishment: repeated spam can raise trace a bit.
-  if (state.wait.streak >= 3 && Math.random() < 0.35) {
-    writeLine("passive scan catches movement", "warn");
-    failBreach();
-  }
-}
-
 function pingCommand(args) {
   const region = state.currentRegion || (state.region && state.region.current);
   if (region !== "introNet") {
@@ -6591,31 +6515,6 @@ function stabilizeGlitch() {
   trustCoolDown(1, "glitch stabilize");
   chatPost({ channel: "#kernel", from: "watcher", body: "you steady the crack. some lines stay readable now." });
   // Future repair hook: stabilized fragments could be rebuilt later without re-parsing lore.
-  markDirty();
-}
-
-function spliceGlitch() {
-  if (!state.flags.has("glitch_fragment_seen")) {
-    writeLine("Nothing to splice.", "dim");
-    return;
-  }
-  if (state.flags.has("glitch_stabilizer")) {
-    writeLine("You already anchored the thread.", "warn");
-    return;
-  }
-  if (state.flags.has("glitch_exploiter")) {
-    writeLine("The fragment is already bleeding power.", "dim");
-    return;
-  }
-  state.flags.add("glitch_exploiter");
-  state.flags.add("glitch_path_memory");
-  state.gc = Math.max(0, (Number(state.gc) || 0) + 25);
-  trustAdjustHeat(2, "glitch splice");
-  profiledTraceRise(1, "glitch splice");
-  setCorruptionLevel(Math.min(3, corruptionLevel() + 1));
-  chatPost({ channel: "#kernel", from: "rogue", body: "you pull the crack wider. residue banks, eyes notice." });
-  // Future exploit hook: amplified corruption could be weaponized later.
-  maybeLockTrustProfile("glitch");
   markDirty();
 }
 
