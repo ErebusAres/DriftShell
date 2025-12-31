@@ -15,17 +15,188 @@ const LOCAL_FOLDER_DB = `${GAME_ID}_local_folder_v1`;
 const LOCAL_FOLDER_STORE = "handles";
 const LOCAL_FOLDER_KEY = "scriptsFolder";
 const LOCAL_SCRATCH_FILE = "scratch.txt";
+const TRUST_MAX_LEVEL = 4;
+const TRUST_MIN_LEVEL = 1;
+const TRUST_HEAT_THRESHOLD = 6;
+const TRUST_COOLDOWN_ON_WAIT = 2;
+const ZONE_NAMES = ["isolated", "local", "pressure", "core", "unstable"];
+// Trust/heat/trace framing (in-world, never shown as glossary):
+// - Trust: long-memory of the network (changes are rare and costly).
+// - Heat: short noise from actions (rises fast, cools fast).
+// - Trace: active response when watchers move (escalates from heat/noise).
 const SEC_LEVELS = ["NULLSEC", "LOWSEC", "MIDSEC", "HIGHSEC", "FULLSEC"];
 // Drive capacity is an in-world abstraction of browser localStorage limits.
 // Keep it comfortably below typical per-origin quotas (~5MB).
 const DRIVE_MAX_CAP_BYTES = 4_000_000;
 // Hackmud-like corruption glyph for "missing" characters in the signal.
 const GLITCH_GLYPH = "█";
+const MESH_BRIDGE_FLAG = "mesh_bridge_done";
 const PRIMER_PAYLOAD = "DRIFTLOCAL::SEED=7|11|23|5|13|2";
 const TRAINING_WORD = "WELCOME";
 const TRAINING_HOME = "HOME";
 const WARDEN_PAYLOAD = "WARDEN::PHASE=1|KEY=RELIC|TRACE=4";
 const UPLINK_PAYLOAD = "UPLINK::PATCH=1|RELAY=MIRROR";
+const ROGUE_PAYLOAD = "ROGUE::CORE=3|PATCH=7|TRACE=ADAPT";
+const CINDER_PAYLOAD = "CINDER::DEPTH=5|CORE=MANTLE|TRACE=9";
+const NARRATIVE_STEPS = [
+  {
+    id: "island_intro",
+    title: "Isolated intro net",
+    beats: ["scan", "read", "checksum"],
+    nodes: ["island.grid", "island.echo"],
+    summary: "A sealed grid that teaches scanning, reading primers, and printing your first keys.",
+  },
+  {
+    name: "trust",
+    summary: "Show current trust/heat and narrative beats.",
+    usage: ["trust"],
+    notes: ["Rapid scans and failed locks raise heat; wait or visit trust.anchor to cool."],
+  },
+  {
+    id: "mesh_explore",
+    title: "Outer mesh exploration",
+    beats: ["exchange", "sniffer", "weaver"],
+    nodes: ["public.exchange", "weaver.den", "monument.beacon"],
+    summary: "You leave the island and scrape GC, scripts, and lore from the bazaar and side dens.",
+  },
+  {
+    id: "trust_pressure",
+    title: "Security and trust",
+    beats: ["trace", "locks", "coolant"],
+    nodes: ["trust.anchor", "corp.audit"],
+    summary: "Actions raise heat; balanced routing and coolant keep you from getting locked out.",
+  },
+  {
+    id: "glitch_arc",
+    title: "Glitched data arc",
+    beats: ["fragments", "decode", "repair"],
+    nodes: ["glitch.cache", "slipper.hole"],
+    summary: "Corrupted fragments hide a chant. Decode, replace missing glyphs, and weave the message.",
+  },
+  {
+    id: "rogue_finale",
+    title: "Rogue core showdown",
+    beats: ["checksum", "trust", "upload"],
+    nodes: ["core.relic", "rogue.core"],
+    summary: "A rogue process adapts to you; combine every learned mechanic to pin it down.",
+  },
+  {
+    id: "cinder_depths",
+    title: "Cinder depth recovery",
+    beats: ["mantle", "trust", "chant"],
+    nodes: ["deep.slate", "trench.node", "cinder.core"],
+    summary: "An optional depth dive with extra locks, checksum proofs, and repaired chants.",
+  },
+];
+const GLITCH_FRAGMENTS = {
+  alpha: { id: "alpha", clue: "FRACTURE", desc: "A sliver that says the drift cracked first." },
+  beta: { id: "beta", clue: "MIRROR", desc: "A reflection that does not match the caller." },
+  gamma: { id: "gamma", clue: "EMBER", desc: "A spark that keeps burning inside signal noise." },
+  delta: { id: "delta", clue: "STILL", desc: "The reminder to slow down when trace rises." },
+};
+const GLITCH_FRAGMENT_IDS = Object.keys(GLITCH_FRAGMENTS);
+const NARRATIVE_CUES = {
+  island_intro: "Isolated grid hums back. Heat is a rumor; keys are facts.",
+  mesh_explore: "Outer mesh hears you now. Cheap signals, loud watchers.",
+  trust_pressure: "Security eyes narrow. Trust and trace move together.",
+  glitch_arc: "Corrupted caches surface. Fragments want repair, not pity.",
+  rogue_finale: "The rogue listens for a chant and a checksum. Bring both.",
+  cinder_depths: "Depth heat leaks upward. Mantle echoes wait for a patient hand.",
+};
+// Map regions to narrative readiness: regions stay dark until the story reaches these beats.
+const REGION_STORY_GATES = {
+  introNet: "island_intro",
+  publicNet: "mesh_explore",
+  corporateNet: "trust_pressure",
+  secureCore: "rogue_finale",
+  cinderDepth: "cinder_depths",
+};
+
+function narrativeStepIndex(stepId) {
+  const idx = NARRATIVE_STEPS.findIndex((s) => s.id === stepId || s.name === stepId || s.title === stepId);
+  return idx === -1 ? 0 : idx;
+}
+
+// Regions only answer once the narrative has reached their gate beat.
+function narrativeAllowsRegion(regionId) {
+  ensureStoryState();
+  const gate = REGION_STORY_GATES[regionId];
+  if (!gate) return true;
+  const current = state.storyState ? state.storyState.current : null;
+  const currentIdx = narrativeStepIndex(current);
+  const gateIdx = narrativeStepIndex(gate);
+  return currentIdx >= gateIdx;
+}
+// Region definitions attach existing locs to narrative zones.
+// To classify a new or existing host, add its loc id to exactly one `nodes` list below.
+// You can extend this list (e.g., add a DLC region) without touching core mechanics.
+const REGION_DEFS = [
+  {
+    id: "introNet",
+    name: "Intro Network",
+    nodes: ["home.hub", "training.node", "island.grid", "island.echo", "trust.anchor"],
+    unlock: { requires: [], flags: [], nodes: [] },
+    entry: ["Switchboard reroutes your signal through the safer mesh and reminds you who is watching."],
+  },
+  {
+    id: "publicNet",
+    name: "Public Net",
+    nodes: [
+      "public.exchange",
+      "weaver.den",
+      "monument.beacon",
+      "pier.gate",
+      "ember.pier",
+      "sable.gate",
+      "relay.uplink",
+      "mirror.gate",
+    ],
+    unlock: {
+      requires: ["introNet"],
+      flags: ["tutorial_training_done"],
+      nodes: ["training.node"],
+    },
+    entry: [
+      "Vendors and watchers share a spine here.",
+      "Every route pretends to be casual until you breach the wrong vault.",
+    ],
+  },
+  {
+    id: "corporateNet",
+    name: "Corporate Net",
+    nodes: ["archives.arc", "lattice.cache", "corp.audit", "glitch.cache", "slipper.hole", "victory.hall", "echo.after"],
+    unlock: {
+      requires: ["publicNet"],
+      flagsAny: ["sniffer_run", "lattice_sigil", "glitch_chant_known"],
+      nodes: ["weaver.den"],
+    },
+    entry: [
+      "The spine hums louder than the exchange.",
+      "Security notices every echo; answer with purpose or be routed back to dust.",
+    ],
+  },
+  {
+    id: "secureCore",
+    name: "Secure Core",
+    nodes: ["core.relic", "rogue.core"],
+    unlock: { requires: ["corporateNet"], flags: ["touched_relic", "glitch_phrase_ready"], nodes: [] },
+    entry: ["A rogue process echoes here. It listens for chants and trust."],
+  },
+  {
+    id: "cinderDepth",
+    name: "Cinder Depth",
+    nodes: ["deep.slate", "trench.node", "cinder.core"],
+    unlock: {
+      requires: ["corporateNet"],
+      flagsAny: ["glitch_phrase_ready", "mantle_phrase", "chat_cinder_ready"],
+      nodes: ["trench.node"],
+    },
+    entry: [
+      "Heat rolls upward from the depth.",
+      "The mantle waits for anyone willing to stitch chants to molten checksum.",
+    ],
+  },
+];
 const CHK_TEMPLATE_CODE = [
   "// @sec FULLSEC",
   "const primer = ctx.read('primer.dat') || '';",
@@ -107,6 +278,156 @@ function hex3(n) {
   return v.toString(16).toUpperCase().padStart(3, "0");
 }
 
+function introMemoryState() {
+  if (!state.introMemory || typeof state.introMemory !== "object") {
+    state.introMemory = { pingCount: 0, pingStreak: 0, lastPingAt: 0, heatSpikes: 0, traceNotice: false, patienceNotice: false };
+  }
+  return state.introMemory;
+}
+
+function noteIntroHeatSpike() {
+  const region = state.currentRegion || (state.region && state.region.current);
+  if (region !== "introNet") return;
+  const mem = introMemoryState();
+  mem.heatSpikes = Math.max(0, Number(mem.heatSpikes) || 0) + 1;
+  if (mem.heatSpikes >= 3) state.flags.add("intro_heat_memory"); // Trust as memory: later regions remember early noise.
+}
+
+function introTraceTeach(reason) {
+  const region = state.currentRegion || (state.region && state.region.current);
+  if (region !== "introNet") return;
+  if (state.flags.has("intro_trace_taught")) return;
+  state.flags.add("intro_trace_taught");
+  introMemoryState().traceNotice = true;
+  chatPost({
+    channel: "#kernel",
+    from: "watcher",
+    body: "trace is a hand that moves when you keep pushing; wait and it will unclench.",
+  });
+}
+
+// Intro island teachable moment: a one-time, in-world nudge that heat is noise,
+// trace is response, trust is memory. Fires only once per save when heat rises.
+function maybeTeachSecurityMoment(delta) {
+  // Only during the intro island region and only once.
+  if (state.flags.has("security_taught") || SECURITY_TEACH_SHOWN) return;
+  if (state.region && state.region.current && state.region.current !== "introNet") return;
+  if (trustHeat() + delta <= 0 && state.trace <= 0) return;
+
+  state.flags.add("security_taught");
+  SECURITY_TEACH_SHOWN = true;
+  chatPost({
+    channel: "#kernel",
+    from: "watcher",
+    body: "noise rises; watchers stir. heat is noise, trace is response, trust remembers.",
+  });
+  // No punishment; natural decay will cool heat. This keeps the moment gentle.
+}
+
+function trustLevel() {
+  if (!state.trust || typeof state.trust !== "object") return TRUST_MIN_LEVEL;
+  return Math.max(TRUST_MIN_LEVEL, Math.min(TRUST_MAX_LEVEL, Number(state.trust.level) || TRUST_MIN_LEVEL));
+}
+
+function trustHeat() {
+  if (!state.trust || typeof state.trust !== "object") return 0;
+  return Math.max(0, Number(state.trust.heat) || 0);
+}
+
+function trustStatusLabel() {
+  const level = trustLevel();
+  const heat = trustHeat();
+  const tiers = ["fragile", "cautious", "steady", "anchored"];
+  const tier = tiers[level - 1] || "unknown";
+  return `trust ${level}/${TRUST_MAX_LEVEL} (${tier}, heat ${heat}/${TRUST_HEAT_THRESHOLD})`;
+}
+
+function trustAdjustHeat(delta, reason) {
+  if (!state.trust || typeof state.trust !== "object") state.trust = { level: 2, heat: 0, lastScanAt: 0 };
+  const zone = currentZone();
+  const heatScale =
+    zone === "isolated" ? 0.7 : zone === "pressure" ? 1.2 : zone === "core" ? 1.3 : zone === "unstable" ? 1.1 : 1;
+  const scaledDelta = delta > 0 ? Math.max(0, Math.round(delta * heatScale)) : delta;
+  const next = Math.max(0, trustHeat() + scaledDelta);
+  state.trust.heat = next;
+  maybeTeachSecurityMoment(delta);
+  if (delta > 0) noteIntroHeatSpike();
+  // Behavioral profiling: if the player keeps spiking heat, quietly shift watcher tone.
+  if (delta > 0) behaviorHeatTone(reason);
+  if (next > 0) state.storyState?.flags?.add("heat_seen");
+  // Heat implies noise; track for adaptation.
+  if (delta > 0) recordRogueBehavior("noise");
+  if (delta > 0) recordBehavior("noise");
+  maybeLockTrustProfile(reason || "heat");
+  const added = discover(["trust.anchor"]);
+  if (added.length) {
+    chatPost({
+      channel: "#kernel",
+      from: "switchboard",
+      body: "Anchor online. `connect trust.anchor` to bleed heat.",
+    });
+  }
+  const lowered = next >= TRUST_HEAT_THRESHOLD;
+  if (lowered) {
+    state.trust.heat = Math.max(0, next - TRUST_HEAT_THRESHOLD);
+    if (state.trust.level > TRUST_MIN_LEVEL) {
+      state.trust.level -= 1;
+      // Persist consequence: later regions will react to lower trust via tone and corruption.
+      chatPost({
+        channel: "#kernel",
+        from: "sys",
+        body: `trust drop (${reason || "heat"}). level ${state.trust.level}/${TRUST_MAX_LEVEL}`,
+        kind: "system",
+      });
+      watcherTrustMemory();
+    } else {
+      state.lockoutUntil = Date.now() + 6000;
+      chatPost({
+        channel: "#kernel",
+        from: "sys",
+        body: "heat spike -> short lockout. wait or cool at trust.anchor.",
+        kind: "system",
+      });
+    }
+  }
+  markDirty();
+  updateHud();
+}
+
+function trustCoolDown(amount, reason) {
+  if (!state.trust || typeof state.trust !== "object") state.trust = { level: 2, heat: 0, lastScanAt: 0 };
+  const priorHeat = trustHeat();
+  const zone = currentZone();
+  const coolScale = zone === "isolated" ? 1.2 : zone === "pressure" ? 0.9 : zone === "core" ? 0.8 : 1;
+  const selectivity =
+    meshBridgeActive() && reason && reason !== "wait" && reason !== "anchor read"
+      ? 0.65
+      : meshBridgeActive()
+        ? 0.85
+        : 1;
+  const next = Math.max(0, trustHeat() - Math.max(0, Math.round(amount * coolScale * selectivity)));
+  state.trust.heat = next;
+  if (reason && reason !== "wait") chatSystem(`trust cool (${reason}) -> heat ${next}/${TRUST_HEAT_THRESHOLD}`);
+  if (reason === "wait" || reason === "anchor read") {
+    recordBehavior("patient");
+    recordRogueBehavior("careful");
+    watcherProfileTick();
+    maybeLockTrustProfile(reason || "wait");
+    const region = state.currentRegion || (state.region && state.region.current);
+    if (region === "introNet" && priorHeat > next && !introMemoryState().patienceNotice) {
+      introMemoryState().patienceNotice = true;
+      // Safe failure recovery acknowledgment: patience is felt, not scored.
+      writeLine("stillness gives the grid room to forget.", "dim");
+    }
+  }
+  markDirty();
+  updateHud();
+}
+
+function trustGate(required) {
+  return trustLevel() >= Math.max(TRUST_MIN_LEVEL, Math.min(TRUST_MAX_LEVEL, Number(required) || 0));
+}
+
 function trainingHandle() {
   return state.handle ? String(state.handle) : "ghost";
 }
@@ -145,6 +466,7 @@ const prompt = document.getElementById("prompt");
 const statusLine = document.getElementById("status-line");
 const gcSpan = document.getElementById("gc");
 const traceSpan = document.getElementById("trace");
+const hud = document.getElementById("hud");
 const hint = document.getElementById("hint");
 const chatLog = document.getElementById("chat-log");
 const chatInput = document.getElementById("chat-input");
@@ -170,6 +492,7 @@ let localSyncPoll = null;
 let localSyncPollActive = false;
 let localScratchLastLocalEdit = 0;
 let localScratchPending = null;
+let glitchBlipTimer = null;
 const localFileMeta = new Map();
 const AUTOSAVE_MIN_INTERVAL_MS = 15_000;
 const AUTOSAVE_FORCE_INTERVAL_MS = 60_000;
@@ -186,7 +509,89 @@ const NON_DIRTY_COMMANDS = new Set([
   "contacts",
   "jobs",
   "diagnose",
+  "trust",
+  "regions",
+  "status",
 ]);
+
+// RegionManager is assigned later; declare upfront to avoid TDZ errors where it is referenced before definition.
+let RegionManager;
+let ESCALATION_SILENCE = 0;
+let SECURITY_TEACH_SHOWN = false;
+
+function meshBridgeActive() {
+  return state.flags.has(MESH_BRIDGE_FLAG);
+}
+
+function normalizeZone(zoneId) {
+  if (meshBridgeActive() && zoneId === "isolated") return "local";
+  return zoneId || "isolated";
+}
+
+function isZoneToken(token) {
+  return ZONE_NAMES.includes(normalizeZone(String(token || "").trim()));
+}
+
+function isCanonicalScriptName(name) {
+  // Idempotence guard: canonicalization must be skip-able to avoid prefix growth
+  // when syncing a folder that also receives mirrored output (local/local/...).
+  const handle = state.handle || "";
+  const key = String(name || "").trim();
+  const parts = key.replace(/^drive:local\//i, "").replace(/\.s$/i, "").split(".");
+  return parts.length >= 3 && parts[0] === handle && isZoneToken(parts[1]);
+}
+
+function scriptBaseFromKey(key) {
+  const handle = state.handle ? String(state.handle) : "";
+  let name = String(key || "").trim().replace(/\.s$/i, "");
+  if (handle && name.startsWith(handle + ".")) name = name.slice(handle.length + 1);
+  const parts = name.split(".");
+  if (parts.length >= 2 && isZoneToken(parts[0])) parts.shift();
+  return parts.join(".");
+}
+
+function canonicalScriptName(rawName, zoneHint) {
+  const handle = state.handle || "ghost";
+  let name = String(rawName || "").trim();
+  name = name.replace(/^drive:local\//i, "");
+  name = name.replace(/\.s$/i, "");
+  if (handle && name.startsWith(handle + ".")) name = name.slice(handle.length + 1);
+  const parts = name.split(".");
+  let zone = normalizeZone(zoneHint || currentZone());
+  if (parts.length >= 2 && isZoneToken(parts[0])) {
+    zone = normalizeZone(parts.shift());
+  }
+  const base = parts.join(".");
+  return {
+    base,
+    zone,
+    canonical: `${handle}.${zone}.${base}.s`,
+  };
+}
+
+function findUserScript(rawName) {
+  const { canonical, base } = canonicalScriptName(rawName);
+  if (state.userScripts && state.userScripts[canonical]) {
+    return { key: canonical, script: state.userScripts[canonical] };
+  }
+  const matchKey = Object.keys(state.userScripts || {}).find((k) => scriptBaseFromKey(k) === base);
+  if (matchKey) return { key: matchKey, script: state.userScripts[matchKey] };
+  return null;
+}
+
+function upsertUserScript(rawName, sec, code, zoneHint) {
+  if (!state.userScripts || typeof state.userScripts !== "object") state.userScripts = {};
+  const found = findUserScript(rawName);
+  // Canonicalize exactly once; skip if already canonical to avoid recursive prefixes.
+  const target =
+    found && isCanonicalScriptName(found.key)
+      ? found.key
+      : found
+        ? canonicalScriptName(found.key, zoneHint).canonical
+        : canonicalScriptName(rawName, zoneHint).canonical;
+  state.userScripts[target] = { owner: state.handle, name: target, sec, code };
+  return target;
+}
 
 function setCorruption(enabled) {
   setCorruptionLevel(enabled ? 1 : 0);
@@ -205,6 +610,35 @@ function applyCorruptionClasses() {
   document.body.classList.toggle("corrupt1", level === 1);
   document.body.classList.toggle("corrupt2", level === 2);
   document.body.classList.toggle("corrupt3", level === 3);
+  if (screen) {
+    screen.classList.toggle("screen-corrupt1", level >= 1);
+    screen.classList.toggle("screen-corrupt2", level >= 2);
+  }
+}
+
+function currentZone() {
+  // Zones are implicit; map regions to zones to shape tone and pressure.
+  const regionId = state.currentRegion || (state.region && state.region.current);
+  if (regionId === "introNet") return normalizeZone("isolated");
+  if (regionId === "publicNet") return normalizeZone("local");
+  if (regionId === "corporateNet") return normalizeZone("pressure");
+  if (regionId === "secureCore") return normalizeZone("core");
+  if (regionId === "cinderDepth") return normalizeZone("unstable");
+  return normalizeZone(state.zone);
+}
+
+function setZone(zoneId) {
+  const z = normalizeZone(zoneId || currentZone());
+  state.zone = z;
+}
+
+function zoneForRegion(regionId) {
+  if (regionId === "introNet") return normalizeZone("isolated");
+  if (regionId === "publicNet") return normalizeZone("local");
+  if (regionId === "corporateNet") return normalizeZone("pressure");
+  if (regionId === "secureCore") return normalizeZone("core");
+  if (regionId === "cinderDepth") return normalizeZone("unstable");
+  return normalizeZone(state.zone);
 }
 
 function setCorruptionLevel(level) {
@@ -217,10 +651,20 @@ function setCorruptionLevel(level) {
   if (n >= 2) state.flags.add("corrupt2");
   if (n >= 3) state.flags.add("corrupt3");
   applyCorruptionClasses();
+  storyProgressEvent("corruption", { level: n });
+  if (n >= 2 && !state.flags.has("trace_corrupt_escalated")) {
+    state.flags.add("trace_corrupt_escalated");
+    chatPost({
+      channel: "#kernel",
+      from: "watcher",
+      body: "signal warps under strain. some replies may distort.",
+    });
+  }
 }
 
 function markDirty() {
   saveDirty = true;
+  if (typeof RegionManager !== "undefined") RegionManager.bootstrap({ silent: true });
   scheduleAutosave();
 }
 
@@ -287,7 +731,7 @@ function runBootSequence({ hasSave }) {
   screen.innerHTML = "";
 
   // Rotating boot easter eggs (real pop-culture/game nods; short lines).
-  const EASTER_EGG_LINES = [
+const EASTER_EGG_LINES = [
     // cyberpunk / netrunning
     "wake up, samurai...",
     "night city ........ online",
@@ -458,11 +902,12 @@ function runBootSequence({ hasSave }) {
     "winter is coming",
     "so say we all",
     "live long and prosper",
-    "the spice must flow",
-    "this is fine",
-    "i'm in",
-  ];
-  const easterEgg = EASTER_EGG_LINES[Math.floor(Math.random() * EASTER_EGG_LINES.length)];
+  "the spice must flow",
+  "this is fine",
+  "i'm in",
+];
+// Boot chatter is intentionally random to keep the shell feeling alive; logo stays deterministic.
+const easterEgg = EASTER_EGG_LINES[Math.floor(Math.random() * EASTER_EGG_LINES.length)];
 
   const logo = [
     "  _____   _____   _____  ______  _______  _____  _    _  ______  _       _      ",
@@ -474,31 +919,31 @@ function runBootSequence({ hasSave }) {
     "                           DRIFTSHELL :: DRIFT LOCAL",
   ];
 
-  // Print logo first, then boot lines under it.
-  const baseLogoAt = 120;
-  logo.forEach((line, idx) => scheduleBootLine(line, "boot bootlogo header", baseLogoAt + idx * 70));
+  // Print logo first, line by line with fixed cadence for an old terminal feel (deterministic).
+  const baseLogoAt = 90;
+  logo.forEach((line, idx) => scheduleBootLine(line, "boot bootlogo header", baseLogoAt + idx * 80));
 
-  const afterLogoAt = baseLogoAt + logo.length * 70 + 220;
-  scheduleBootLine(" ", "boot bootlogo dim", afterLogoAt - 120);
+  const afterLogoAt = baseLogoAt + logo.length * 80 + 140;
+  scheduleBootLine(" ", "boot bootlogo dim", afterLogoAt - 80);
 
   const steps = [
     { t: 0, kind: "boot bootlog dim", text: "BOOTSTRAP v0.9 :: drift-compatible" },
-    { t: 220, kind: "boot bootlog dim", text: "devsig ............ ErebusAres" },
-    { t: 430, kind: "boot bootlog dim", text: "memchk ............ ok" },
-    { t: 640, kind: "boot bootlog dim", text: "ioctl  ............ ok" },
-    { t: 860, kind: "boot bootlog dim", text: "gpu   ............. ok" },
-    { t: 1100, kind: "boot bootlog dim", text: "netlink DRIFT/LOCAL  ok" },
-    { t: 1320, kind: "boot bootlog dim", text: "chatd ............. init" },
-    { t: 1540, kind: "boot bootlog dim", text: hasSave ? "scratch ........... restoring session" : "scratch ........... ready" },
-    // Easter egg (random)
-    { t: 1760, kind: "boot bootlog dim", text: easterEgg },
-    { t: 1980, kind: "boot bootlog dim", text: "mount /shell ....... ok" },
-    { t: 2200, kind: "boot bootlog dim", text: "press any key to skip" },
+    { t: 130, kind: "boot bootlog dim", text: "devsig ............ ErebusAres" },
+    { t: 260, kind: "boot bootlog dim", text: "memchk ............ ok" },
+    { t: 390, kind: "boot bootlog dim", text: "ioctl  ............ ok" },
+    { t: 520, kind: "boot bootlog dim", text: "gpu   ............. ok" },
+    { t: 650, kind: "boot bootlog dim", text: "netlink DRIFT/LOCAL  ok" },
+    { t: 780, kind: "boot bootlog dim", text: "chatd ............. init" },
+    { t: 910, kind: "boot bootlog dim", text: hasSave ? "scratch ........... restoring session" : "scratch ........... ready" },
+    // Easter egg remains random each boot; only this line varies.
+    { t: 1040, kind: "boot bootlog dim", text: easterEgg },
+    { t: 1170, kind: "boot bootlog dim", text: "mount /shell ....... ok" },
+    { t: 1300, kind: "boot bootlog dim", text: "press any key to skip" },
   ];
 
   steps.forEach((s) => scheduleBootLine(s.text, s.kind, afterLogoAt + s.t));
 
-  const doneAt = afterLogoAt + 2550;
+  const doneAt = afterLogoAt + 1500;
   const finish = () => {
     clearBootTimers();
     setBooting(false);
@@ -1006,6 +1451,8 @@ async function syncLocalFolder() {
         if (changed) scratchUpdated = true;
         continue;
       }
+      // Skip files already in canonical form to avoid re-importing mirrored output.
+      if (isCanonicalScriptName(name)) continue;
       const file = await entry.getFile();
       updateLocalFileMeta(name, file);
       const mirror = parseMirrorDownloadName(name);
@@ -1032,19 +1479,19 @@ async function syncLocalFolder() {
       const text = await file.text();
       seen += 1;
 
-      const existing = state.userScripts && state.userScripts[scriptName];
-      const existingCode = existing && typeof existing.code === "string" ? existing.code : null;
       const secMatch = text.match(/@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i);
       const sec = secMatch ? secMatch[1].toUpperCase() : "FULLSEC";
-      state.userScripts[scriptName] = { owner: state.handle, name: scriptName, sec, code: text };
+      const existing = findUserScript(scriptName);
+      const existingCode = existing && existing.script && typeof existing.script.code === "string" ? existing.script.code : null;
+      const savedKey = upsertUserScript(scriptName, sec, text, currentZone());
 
       if (!existing) added += 1;
-      else if (existingCode !== text || existing.sec !== sec) updated += 1;
+      else if (existingCode !== text || existing.script.sec !== sec) updated += 1;
       else unchanged += 1;
 
-      const driveName = `${state.handle}.${scriptName}.s`;
+      const driveName = savedKey;
       const driveKey = driveId("local", driveName);
-      const meta = { type: "script", script: { name: scriptName, sec, code: text } };
+      const meta = { type: "script", script: { name: savedKey, sec, code: text } };
       if (driveHas(driveKey)) updateDriveContent(driveKey, text, meta);
       else storeDriveCopy("local", driveName, meta);
     }
@@ -1142,9 +1589,12 @@ async function mirrorDownloadToLocalFolder(locName, fileName, entry) {
 }
 
 async function mirrorUserScriptToLocalFolder(scriptName, code) {
+  // Defensive: do not mirror scripts back into the watched folder if the name is already canonical;
+  // this prevents local sync from re-reading its own output and growing prefixes recursively.
   if (!shouldMirrorLocal()) return;
   if (!supportsLocalFolder() || !window.isSecureContext) return;
   if (!localFolderHandle) return;
+  if (isCanonicalScriptName(scriptName)) return;
   const perm = await ensureLocalFolderPermission(true);
   if (!perm.ok) {
     writeLine("Local sync blocked: permission denied.", "warn");
@@ -1154,7 +1604,8 @@ async function mirrorUserScriptToLocalFolder(scriptName, code) {
   const name = String(scriptName || "").trim();
   if (!name) return;
   try {
-    await writeLocalMirrorFile(`${name}.s`, String(code || ""));
+    const fileName = name.toLowerCase().endsWith(".s") ? name : `${name}.s`;
+    await writeLocalMirrorFile(fileName, String(code || ""));
   } catch (err) {
     writeLine("Local script save failed: " + (err && err.message ? err.message : "error"), "warn");
   }
@@ -1277,13 +1728,14 @@ async function pollLocalFolderChanges() {
     if (!state.handle) continue;
     const secMatch = text.match(/@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i);
     const sec = secMatch ? secMatch[1].toUpperCase() : "FULLSEC";
-    const existing = state.userScripts && state.userScripts[scriptName];
-    const existingCode = existing && typeof existing.code === "string" ? existing.code : null;
-    if (!existing || existingCode !== text || existing.sec !== sec) {
-      state.userScripts[scriptName] = { owner: state.handle, name: scriptName, sec, code: text };
-      const driveName = `${state.handle}.${scriptName}.s`;
+    const existing = findUserScript(scriptName);
+    const existingCode = existing && existing.script && typeof existing.script.code === "string" ? existing.script.code : null;
+    const savedKey = upsertUserScript(scriptName, sec, text, currentZone());
+    const changed = !existing || existingCode !== text || existing.script.sec !== sec;
+    if (changed) {
+      const driveName = savedKey;
       const driveKey = driveId("local", driveName);
-      const meta = { type: "script", script: { name: scriptName, sec, code: text } };
+      const meta = { type: "script", script: { name: savedKey, sec, code: text } };
       if (driveHas(driveKey)) updateDriveContent(driveKey, text, meta);
       else storeDriveCopy("local", driveName, meta);
       scriptUpdates += 1;
@@ -1552,6 +2004,7 @@ function getKnownNamesRegex() {
 function renderTerminalRich(container, text) {
   // Light token highlighting to mimic hackmud coloring.
   // Keep it safe: create spans, don't inject HTML.
+  text = applyEscalationTextEffects(String(text || ""));
   const nameRegex = getKnownNamesRegex();
   const patterns = [
     { re: /\bscripts\.trust(?:\.[a-zA-Z0-9_.]+)?\b/g, cls: "tok trust" },
@@ -1647,6 +2100,18 @@ function renderTerminalRich(container, text) {
   container.appendChild(frag);
 }
 
+function cooledSystemTone(body, from, kind) {
+  if (!meshBridgeActive()) return String(body || "");
+  const speaker = String(from || "").toLowerCase();
+  const systemish =
+    kind === "system" || ["sys", "switchboard", "watcher", "archivist", "warden"].includes(speaker);
+  if (!systemish) return String(body || "");
+  const trimmed = String(body || "").replace(/`[^`]+`/g, "").replace(/\s{2,}/g, " ").trim();
+  const sentence = trimmed.split(/(?<=[.?!])\s+/)[0] || trimmed;
+  const cooled = sentence.length > 96 ? sentence.slice(0, 94) + "…" : sentence;
+  return cooled || String(body || "");
+}
+
 function chatPost({ channel, from, body, kind }) {
   const resolvedFrom = from || state.handle || "ghost";
   const resolvedKind = kind || "user";
@@ -1654,7 +2119,7 @@ function chatPost({ channel, from, body, kind }) {
     t: Date.now(),
     channel: channel || state.chat.channel,
     from: resolvedFrom,
-    body: String(body || ""),
+    body: cooledSystemTone(body, resolvedFrom, resolvedKind),
     kind: resolvedKind,
     color: resolvedKind === "system" ? null : userColorClass(resolvedFrom),
     uid: resolvedKind === "system" ? "----" : userId4(resolvedFrom),
@@ -2280,6 +2745,12 @@ const HELP_DEFS = [
     usage: ["diagnose"],
   },
   {
+    name: "regions",
+    summary: "List network regions, unlock cues, and member nodes.",
+    usage: ["regions"],
+    notes: ["Regions gate visibility, not mechanics; fulfill narrative cues to open them."],
+  },
+  {
     name: "download",
     summary: "Queue file downloads from the current loc.",
     usage: ["download <file|glob>"],
@@ -2581,8 +3052,8 @@ const state = {
   handle: null,
   loc: "home.hub",
   gc: 120,
-  discovered: new Set(["home.hub", "training.node", "public.exchange", "sable.gate"]),
-  unlocked: new Set(["home.hub", "public.exchange"]),
+  discovered: new Set(["home.hub", "training.node", "public.exchange", "sable.gate", "island.grid", "trust.anchor"]),
+  unlocked: new Set(["home.hub", "public.exchange", "island.grid", "trust.anchor"]),
   inventory: new Set(),
   drive: {},
   kit: {},
@@ -2624,7 +3095,249 @@ const state = {
     active: null,
     queue: [],
   },
+  trust: { level: 2, heat: 0, lastScanAt: 0 },
+  region: { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() },
+  currentRegion: null,
+  narrativeHint: null,
+  glitchChant: null,
+  zone: "isolated",
+  trustProfile: null,
+  introMemory: { pingCount: 0, pingStreak: 0, lastPingAt: 0, heatSpikes: 0, traceNotice: false, patienceNotice: false },
+  storyState: {
+    current: "island_intro",
+    completed: new Set(),
+    beats: new Set(),
+    flags: new Set(),
+    failed: new Set(),
+  },
+  rogueProfile: { noise: 0, careful: 0, brute: 0, failures: 0, outcomes: new Set() },
+  behaviorProfile: { noise: 0, careful: 0, aggressive: 0, patient: 0 },
+  watcherProfile: null,
 };
+
+// RegionManager tracks named network zones (regions), which nodes they contain,
+// and the player's narrative progression between them. It does not change core mechanics;
+// it layers story/state on top of existing loc discovery/locks and provides hooks for future puzzles.
+RegionManager = (() => {
+  const regionById = new Map(REGION_DEFS.map((def) => [def.id, def]));
+  const nodeIndex = new Map();
+  REGION_DEFS.forEach((def) => def.nodes.forEach((node) => nodeIndex.set(node, def.id)));
+
+  function ensureState() {
+    if (!state.region || typeof state.region !== "object") {
+      state.region = { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() };
+    }
+    if (!(state.region.unlocked instanceof Set)) state.region.unlocked = new Set(state.region.unlocked || []);
+    if (!(state.region.visited instanceof Set)) state.region.visited = new Set(state.region.visited || []);
+    if (!(state.region.pending instanceof Set)) state.region.pending = new Set(state.region.pending || []);
+  }
+
+  function getDef(regionId) {
+    return regionById.get(regionId) || null;
+  }
+
+  function regionForNode(node) {
+    return nodeIndex.get(node) || null;
+  }
+
+  function unlockRequirementsMet(def) {
+    const unlock = def.unlock || {};
+    const requires = Array.isArray(unlock.requires) ? unlock.requires : [];
+    const nodes = Array.isArray(unlock.nodes) ? unlock.nodes : [];
+    const flags = Array.isArray(unlock.flags) ? unlock.flags : [];
+    const flagsAny = Array.isArray(unlock.flagsAny) ? unlock.flagsAny : [];
+    const regionsOk = requires.every((id) => state.region.unlocked.has(id));
+    const nodesOk = !nodes.length || nodes.some((node) => state.unlocked.has(node) || state.discovered.has(node));
+    const flagsOk = flags.every((flag) => state.flags.has(flag));
+    const flagsAnyOk = !flagsAny.length || flagsAny.some((flag) => state.flags.has(flag));
+    const storyOk = narrativeAllowsRegion(def.id);
+    return regionsOk && nodesOk && flagsOk && flagsAnyOk && storyOk;
+  }
+
+  // Ensure older saves auto-unlock regions whose nodes are already known/unlocked.
+  function legacyUnlock(def) {
+    return (
+      state.flags.has("region_legacy_backfill") &&
+      def.nodes.some((node) => state.unlocked.has(node) || state.discovered.has(node))
+    );
+  }
+
+  function unlockRegion(regionId, { silent } = {}) {
+    ensureState();
+    if (state.region.unlocked.has(regionId)) return false;
+    const def = getDef(regionId);
+    if (!def) return false;
+    if (!unlockRequirementsMet(def) && !legacyUnlock(def)) return false;
+    state.region.unlocked.add(regionId);
+    def.nodes.forEach((node) => state.region.pending.delete(node));
+    // Auto-discover any nodes that were held back while the region was locked.
+    def.nodes.forEach((node) => {
+      if (!state.discovered.has(node)) state.discovered.add(node);
+    });
+    markDirty();
+    if (!silent) {
+      const whisper = `route shift: ${def.name} begins to answer (${def.nodes.length} hosts listening)`;
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: whisper,
+      });
+    }
+    return true;
+  }
+
+  function syncUnlocks({ silent } = {}) {
+    ensureState();
+    REGION_DEFS.forEach((def) => {
+      if (def.unlock && def.unlock.requires && def.unlock.requires.length === 0 && def.unlock.flags?.length === 0) {
+        unlockRegion(def.id, { silent: true });
+      }
+      unlockRegion(def.id, { silent });
+    });
+  }
+
+  function bootstrap({ silent } = {}) {
+    ensureState();
+    syncUnlocks({ silent });
+    if (!state.region.current && state.region.unlocked.size) {
+      state.region.current = Array.from(state.region.unlocked)[0];
+    }
+  }
+
+  function noteDiscovery(node) {
+    ensureState();
+    const regionId = regionForNode(node);
+    if (!regionId) return;
+    if (!state.region.unlocked.has(regionId)) {
+      state.region.pending.add(node);
+      return;
+    }
+  }
+
+  function isNodeVisible(node) {
+    const regionId = regionForNode(node);
+    if (!regionId) return true;
+    ensureState();
+    return state.region.unlocked.has(regionId);
+  }
+
+  function canAccessNode(node) {
+    const regionId = regionForNode(node);
+    if (!regionId) return { ok: true };
+    ensureState();
+    if (state.region.unlocked.has(regionId)) return { ok: true };
+    const def = getDef(regionId);
+    const unlock = def && def.unlock ? def.unlock : {};
+    const needs = [];
+    const requires = Array.isArray(unlock.requires) ? unlock.requires : [];
+    const nodes = Array.isArray(unlock.nodes) ? unlock.nodes : [];
+    const flags = Array.isArray(unlock.flags) ? unlock.flags : [];
+    const flagsAny = Array.isArray(unlock.flagsAny) ? unlock.flagsAny : [];
+    if (requires.length) needs.push("regions: " + requires.join(", "));
+    if (flags.length) needs.push("signals: " + flags.join(", "));
+    if (flagsAny.length) needs.push("any signal: " + flagsAny.join(", "));
+    if (nodes.length) needs.push("story nodes: " + nodes.join(", "));
+    return {
+      ok: false,
+      regionId,
+      hint: needs.length ? needs.join(" | ") : "route sealed",
+      name: def ? def.name : regionId,
+    };
+  }
+
+  function emitRegionEntry(regionId) {
+    ensureState();
+    const def = getDef(regionId);
+    if (!def || state.region.visited.has(regionId)) return;
+    state.region.visited.add(regionId);
+    const lines = Array.isArray(def.entry) ? def.entry : [String(def.entry || def.name)];
+    lines.forEach((line) =>
+      chatPost({
+        channel: "#kernel",
+        from: "sys",
+        body: `[region:${def.id}] ${line}`,
+      })
+    );
+    onRegionEnter(def);
+    markDirty();
+  }
+
+  function enterRegionByNode(node) {
+    ensureState();
+    const regionId = regionForNode(node);
+    if (!regionId) return;
+    if (!state.region.unlocked.has(regionId)) {
+      // Enter attempts can still unlock the region if conditions were just met.
+      if (!unlockRegion(regionId, { silent: false })) return;
+    }
+    state.region.current = regionId;
+    state.currentRegion = regionId;
+    emitRegionEntry(regionId);
+  }
+
+  function describeRegions() {
+    ensureState();
+    writeLine("REGIONS", "header");
+    REGION_DEFS.forEach((def) => {
+      const open = state.region.unlocked.has(def.id);
+      const visit = state.region.visited.has(def.id) ? "visited" : "unvisited";
+      const label = open ? "[listening]" : "[silent]";
+      writeLine(`${label} ${def.name} (${visit})`, open ? "ok" : "dim");
+      writeLine("  nodes: " + def.nodes.join(", "), "dim");
+      if (!state.region.unlocked.has(def.id)) {
+        const hint = "routing noise masks this span; follow prior signals";
+        writeLine("  hint: " + hint, "dim");
+      }
+    });
+  }
+
+  return {
+    ensureState,
+    syncUnlocks,
+    bootstrap,
+    regionForNode,
+    isRegionUnlocked: (regionId) => state.region && state.region.unlocked instanceof Set && state.region.unlocked.has(regionId),
+    isNodeVisible,
+    canAccessNode,
+    enterRegionByNode,
+    noteDiscovery,
+    describeRegions,
+  };
+})();
+
+// Stub hook for future puzzle injections when a region is first entered.
+function onRegionEnter(region) {
+  // Example extension:
+  // if (region.id === "corporateNet") chatPost({ channel: "#kernel", from: "sys", body: "Audit eyes open." });
+  // Keep side effects minimal to avoid altering base mechanics.
+  if (region && region.id) setZone(zoneForRegion(region.id));
+  if (state.flags.has("intro_heat_memory") && region && region.id && region.id !== "introNet") {
+    const key = `intro_heat_echo_${region.id}`;
+    if (!state.flags.has(key)) {
+      state.flags.add(key);
+      chatPost({
+        channel: "#kernel",
+        from: "watcher",
+        body: "your early noise rides ahead of you. some routes may tense faster this time.",
+      });
+    }
+  }
+  if (region && region.id && region.id !== "introNet" && state.flags.has("glitch_path_memory")) {
+    const key = `glitch_path_echo_${region.id}`;
+    if (!state.flags.has(key)) {
+      state.flags.add(key);
+      if (state.flags.has("glitch_stabilizer")) {
+        chatPost({ channel: "#kernel", from: "watcher", body: "some cracks close when you arrive; a memory of steady hands." });
+      } else if (state.flags.has("glitch_exploiter")) {
+        chatPost({ channel: "#kernel", from: "rogue", body: "you like to pry seams open. routes remember." });
+      }
+    }
+  }
+  return region;
+}
+
+// Initialize region progression at boot so regions with no requirements open immediately.
+RegionManager.bootstrap({ silent: true });
 
 const MARKS = [
   { id: "mark.scan", text: "Run scripts.trust.scan" },
@@ -2643,7 +3356,7 @@ const LOCS = {
     ],
     requirements: {},
     locks: [],
-    links: ["training.node", "public.exchange", "sable.gate"],
+    links: ["training.node", "public.exchange", "sable.gate", "island.grid", "trust.anchor"],
     files: {
       "readme.txt": {
         type: "text",
@@ -2736,6 +3449,12 @@ const LOCS = {
           "",
           "Run after each step: `call <you>.chk`",
           "Fast path: `edit chk --example`, then `:wq`.",
+          "",
+          "Optional: make a tiny listener that reacts to extra words you add:",
+          "  edit listen --from listen.example   (copy the sample)",
+          "  call <you>.listen                   (no extra words)",
+          "  call <you>.listen calm              (extra word; different feel)",
+          "Add any single word after the name. Unknown words are ignored softly.",
         ].join("\n"),
       },
       "chk.example": {
@@ -2757,6 +3476,35 @@ const LOCS = {
           "ctx.print(String(word).trim());",
           "ctx.print(key3);",
           "ctx.print(handle + ' ' + String(word).trim() + ' ' + String(home).trim() + ' ' + key3);",
+        ].join("\n"),
+      },
+      "listen.example": {
+        type: "text",
+        content: [
+          "LISTEN.EXAMPLE",
+          "A gentle starter that reacts to extra words after the script name.",
+          "",
+          "// @sec FULLSEC",
+          "// Words after the script name are what this hears.",
+          "const heard = (ctx.args && Array.isArray(ctx.args._) ? ctx.args._ : []).filter(Boolean);",
+          "const focus = heard.find((w) => /calm|quiet|soft|signal|ping|flare/i.test(String(w)));",
+          "",
+          "// Base sweep: no extra words.",
+          "if (!heard.length) {",
+          "  ctx.print('listening: wide sweep, nothing specific yet.');",
+          "  ctx.print('try adding one word after the name (example: calm)');",
+          "  return;",
+          "}",
+          "",
+          "// Focused sweep when you offer a word.",
+          "if (focus) {",
+          "  ctx.print('tuning toward ' + focus + '. keeping trace light.');",
+          "} else {",
+          "  ctx.print('heard: ' + heard.join(' '));",
+          "  ctx.print('no clear signal, keeping the sweep gentle.');",
+          "}",
+          "",
+          "// Extra words beyond the first are ignored quietly.",
         ].join("\n"),
       },
       "message.txt": {
@@ -2781,6 +3529,76 @@ const LOCS = {
           "It's offering you an edge where rules fall off.",
           "",
           "Code phrase: PIER//OPEN",
+        ].join("\n"),
+      },
+    },
+  },
+  "island.grid": {
+    title: "ISLAND.GRID",
+    desc: [
+      "A sealed training lattice with curated signals.",
+      "Switchboard routes pings here before you meet the wider Drift.",
+    ],
+    requirements: {},
+    locks: [],
+    links: ["home.hub", "training.node", "island.echo"],
+    files: {
+      "grid.map": {
+        type: "text",
+        content: [
+          "ISLAND GRID",
+          "This pocket net is a soft launch. Scan, cat, and build your first helper script before the bigger mesh answers.",
+          "",
+          "Route:",
+          "  1) scan                 (discover) ",
+          "  2) cat primer.dat       (read clues)",
+          "  3) edit chk --example   (save script)",
+          "  4) call <you>.chk       (print keys)",
+          "  5) breach training.node (solve locks)",
+          "",
+          "Optional: island.echo unlocks after you clear training.node.",
+          "Optional: tap the island beacon with `ping` if you want to hear it breathe.",
+        ].join("\n"),
+      },
+      "grid.jobs": {
+        type: "text",
+        content: [
+          "GRID JOB BOARD",
+          "Switchboard: \"Prove you can read without guessing.\"",
+          "Archivist:  \"Checksum is a mood. Learn it.\"",
+          "Weaver:     \"Our marks need people who finish things.\"",
+        ].join("\n"),
+      },
+    },
+  },
+  "island.echo": {
+    title: "ISLAND.ECHO",
+    desc: [
+      "A narrow repeater that only boots after you clear the lab locks.",
+      "The net thanks you in static, then teaches you how to listen.",
+    ],
+    requirements: { flags: ["tutorial_training_done"] },
+    locks: [],
+    links: ["island.grid", "home.hub"],
+    files: {
+      "echo.log": {
+        type: "text",
+        content: [
+          "ISLAND ECHO",
+          "The Drift whispers back when you answer honestly.",
+          "",
+          "Notes:",
+          "- Trust is heat. Breach carefully to keep routes open.",
+          "- Wait cools heat. trust.anchor cools faster.",
+          "- Glitched fragments will start appearing once you leave the island.",
+        ].join("\n"),
+      },
+      "fragment.alpha": {
+        type: "text",
+        content: [
+          "FRAGMENT.ALPHA",
+          "Signal clue: FRACTURE",
+          "The Drift cracked here first. Replace the missing glyphs when you decode other fragments.",
         ].join("\n"),
       },
     },
@@ -2814,7 +3632,7 @@ const LOCS = {
         hint: "Combine keys: <handle> <word> <home> <key3>.",
       },
     ],
-    links: ["home.hub"],
+    links: ["home.hub", "island.grid"],
     files: {
       "lab.log": {
         type: "text",
@@ -2911,6 +3729,62 @@ const LOCS = {
           "/* spoof.s */",
           "function main(ctx,args){",
           "  // Spoof a temporary mask signature.",
+          "}",
+        ].join("\n"),
+      },
+      // Early behavioral fork (profit): fast GC with heat + watcher pressure. Safe stumble, no lockouts.
+      "flash.s": {
+        type: "script",
+        script: {
+          name: "flash",
+          sec: "MIDSEC",
+          code: [
+            "// @sec MIDSEC",
+            "const fast = ctx.flagged('flash_fast');",
+            "const rewarded = ctx.flagged('flash_paid');",
+            "const gc = rewarded ? 12 : 25;",
+            "// Profit path: quick GC with heat + watcher attention. Safe stumble, not a lock.",
+            "ctx.gc(gc);",
+            "ctx.print(`GC +${gc}`);",
+            "ctx.flag('flash_paid');",
+            "ctx.adjustHeat(2, 'flash deal');",
+            "ctx.behavior('aggressive');",
+            "ctx.behavior('noise');",
+            "if (fast) { ctx.traceBump('flash repeat'); ctx.print('watchers narrow eyes'); }",
+            "ctx.flag('flash_fast');",
+          ].join("\n"),
+        },
+        content: [
+          "/* flash.s */",
+          "function main(ctx,args){",
+          "  // Quick scrap flip. Pays out fast, but the signal runs hot.",
+          "}",
+        ].join("\n"),
+      },
+      // Early behavioral fork (observation): patience yields tone/lore instead of GC; heat stays low.
+      "listen.s": {
+        type: "script",
+        script: {
+          name: "listen",
+          sec: "LOWSEC",
+          code: [
+            "// @sec LOWSEC",
+            "const calm = ctx.lastWaitMs && ctx.lastWaitMs() > 2500;",
+            "const first = !ctx.flagged('listen_once');",
+            "// Observation path: slower, lower heat, reveals tone instead of GC.",
+            "if (calm) ctx.coolHeat(1, 'listen');",
+            "ctx.behavior('patient');",
+            "ctx.behavior('careful');",
+            "ctx.flag('listen_once');",
+            "ctx.print(calm ? 'static thins; a quiet log surfaces.' : 'static steady; hold longer to hear more.');",
+            "if (first) ctx.post('#kernel','watcher','stillness logged; some routes stay loose when you linger.');",
+            "if (ctx.corruptionLevel() >= 2 && calm) ctx.print('█ree-line hum traced across the mesh.');",
+          ].join("\n"),
+        },
+        content: [
+          "/* listen.s */",
+          "function main(ctx,args){",
+          "  // Stand still, let the mesh talk back.",
           "}",
         ].join("\n"),
       },
@@ -3218,6 +4092,216 @@ const LOCS = {
       },
     },
   },
+  "trust.anchor": {
+    title: "TRUST.ANCHOR",
+    desc: [
+      "A quiet maintenance anchor Switchboard wired into the simulation.",
+      "Heat bleeds off the longer you stay, and logs update while you wait.",
+    ],
+    requirements: {},
+    locks: [],
+    links: ["home.hub", "public.exchange"],
+    files: {
+      "anchor.log": {
+        type: "text",
+        content: [
+          "TRUST ANCHOR",
+          "Rapid scans and failed locks raise heat. Too much heat drops trust levels and triggers lockouts.",
+          "",
+          "Cool paths:",
+          "- wait          (slow cool: trace + trust)",
+          "- visit here    (reading this cools heat)",
+          "- install coolant upgrades for trace",
+          "",
+          "Trust gates some locs. Keep it steady if you want deeper routes.",
+        ].join("\n"),
+      },
+      "anchor.brief": {
+        type: "text",
+        content: [
+          "NARRATIVE STEP :: trust_pressure",
+          "A reminder: every security layer is a story about paranoia.",
+          "Balance heat with patience; anchor before you breach again.",
+        ].join("\n"),
+      },
+    },
+  },
+  "deep.slate": {
+    title: "DEEP.SLATE",
+    desc: [
+      "A slate of old relays stacked under the archive.",
+      "Signals smear here; patience and trust keep them readable.",
+    ],
+    requirements: { flags: ["trace_open", "lattice_sigil"], trust: 2 },
+    locks: [
+      {
+        prompt: "LOCK: recite the lattice sigil",
+        answer: "SIGIL: LATTICE",
+        hint: "Decode key.b64 in the archive.",
+      },
+    ],
+    links: ["lattice.cache", "trench.node"],
+    files: {
+      "slate.log": {
+        type: "text",
+        content: [
+          "DEEP SLATE",
+          "The archive warned you about depth. This slate is the descent.",
+          "",
+          "Need:",
+          "- Trust level 2+ (cool heat first)",
+          "- Lattice sigil (still applies down here)",
+          "- Patience: read everything, compute everything",
+          "",
+          "Run phase.s to pull a trench key. Expect checksum locks ahead.",
+        ].join("\n"),
+      },
+      "slate.b64": { type: "text", cipher: true, content: "TUFORE0MRQ==" },
+      "phase.s": {
+        type: "script",
+        script: {
+          name: "phase",
+          sec: "MIDSEC",
+          code: [
+            "// @sec MIDSEC",
+            "if (ctx.hasItem('trench.key')) { ctx.print('Trench key already generated.'); return; }",
+            "const payload = ctx.read('trench.dat') || '';",
+            "const handle = ctx.handle();",
+            "if (!payload) { ctx.print('No payload (need trench.dat).'); return; }",
+            "const text = payload.trim() + '|HANDLE=' + handle;",
+            "const sum = ctx.util.checksum(text);",
+            "ctx.addItem('trench.key');",
+            "ctx.flag('deep_signal');",
+            "ctx.print('Trench key minted.');",
+            "ctx.print('phase checksum: ' + ctx.util.hex3(sum));",
+          ].join("\n"),
+        },
+        content: [
+          "/* phase.s */",
+          "function main(ctx,args){",
+          "  // Mint a trench.key and preview the checksum path forward.",
+          "}",
+        ].join("\n"),
+      },
+      "trench.dat": {
+        type: "text",
+        content: [
+          "TRENCH.DAT",
+          "payload=" + CINDER_PAYLOAD,
+          "text = payload + '|HANDLE=<your_handle>'",
+          "expected = hex3(checksum(text))",
+        ].join("\n"),
+      },
+    },
+  },
+  "trench.node": {
+    title: "TRENCH.NODE",
+    desc: [
+      "A cooled trench lined with audit mirrors.",
+      "The locks here demand sigils, phrases, and clean math.",
+    ],
+    requirements: { items: ["trench.key"], trust: 2 },
+    locks: [
+      {
+        prompt: "LOCK: weave phrase required",
+        answer: "THREAD THE DRIFT",
+        hint: "Run sniffer.s; keep the phrase handy.",
+      },
+      {
+        prompt: "LOCK: checksum payload (hex3)",
+        answer: () => expectedForChecksumPayload(CINDER_PAYLOAD),
+        hint: "Use trench.dat or run phase.s for the checksum math.",
+      },
+    ],
+    links: ["deep.slate", "cinder.core"],
+    files: {
+      "trench.log": {
+        type: "text",
+        content: [
+          "TRENCH LOG",
+          "The slate opens the trench. The trench opens the core.",
+          "",
+          "Locks:",
+          "- Weave phrase (from sniffer.s)",
+          "- Checksum from trench.dat (hex3)",
+          "",
+          "Reward: a cinder mote, needed for the depth token.",
+        ].join("\n"),
+      },
+      "mantle.rot13": { type: "text", cipher: true, content: "ZNAGYR" },
+      "cinder.mote": {
+        type: "item",
+        item: "cinder.mote",
+        content: ["CINDER.MOTE", "A fragment of cooled ember light."].join("\n"),
+      },
+      "mix.s": {
+        type: "script",
+        script: {
+          name: "mix",
+          sec: "HIGHSEC",
+          code: [
+            "// @sec HIGHSEC",
+            "const need = ['cinder.mote','relic.key','relay.shard'].filter((x) => !ctx.hasItem(x));",
+            "if (need.length) { ctx.print('Missing: ' + need.join(', ')); return; }",
+            "if (ctx.hasItem('cinder.token')) { ctx.print('Cinder token already forged.'); return; }",
+            "ctx.addItem('cinder.token');",
+            "ctx.print('Forged: cinder.token');",
+          ].join("\n"),
+        },
+        content: [
+          "/* mix.s */",
+          "function main(ctx,args){",
+          "  // Combine trench rewards + relic gear into a depth token.",
+          "}",
+        ].join("\n"),
+      },
+    },
+  },
+  "cinder.core": {
+    title: "CINDER.CORE",
+    desc: [
+      "A cooled remnant of the rogue process, nested below the relic.",
+      "This core accepts chants, sigils, and proof you kept trust steady.",
+    ],
+    requirements: { items: ["cinder.token"], flags: ["glitch_phrase_ready"], trust: 3 },
+    locks: [
+      {
+        prompt: "CINDER: checksum(payload|HANDLE=<you>) (hex3)",
+        answer: () => expectedForChecksumPayload(CINDER_PAYLOAD),
+        hint: "Compute from trench.dat or phase.s output.",
+      },
+      {
+        prompt: "CINDER: repaired chant",
+        answer: "MIRROR THE EMBER STILL THREAD",
+        hint: "Run stitch.s after fixing fragments.",
+      },
+      {
+        prompt: "CINDER: mantle word",
+        answer: "MANTLE",
+        hint: "Decode mantle.rot13 or slate.b64.",
+      },
+    ],
+    links: ["trench.node", "core.relic"],
+    files: {
+      "cinder.log": {
+        type: "text",
+        content: [
+          "CINDER CORE",
+          "The trench minted a mote; the relic gave you leverage. Put them together.",
+          "",
+          "This is optional endgame. Rewards are bragging rights + heat control.",
+        ].join("\n"),
+      },
+      "upg.coolant": {
+        type: "upgrade",
+        item: "upg.coolant",
+        content: [
+          "UPGRADE: COOLANT+",
+          "A tuned coolant line. Install to reduce trace by 2 and cool heat a bit.",
+        ].join("\n"),
+      },
+    },
+  },
   "corp.audit": {
     title: "CORP.AUDIT",
     desc: ["An audit chamber lit by cold LEDs.", "Anything unmasked gets burned."],
@@ -3256,7 +4340,7 @@ const LOCS = {
         hint: "Decode key.b64 in the archive.",
       },
     ],
-    links: ["archives.arc", "core.relic"],
+    links: ["archives.arc", "core.relic", "glitch.cache", "deep.slate"],
     files: {
       "cache.log": {
         type: "text",
@@ -3316,7 +4400,7 @@ const LOCS = {
         hint: "You only get here by forking. Say it.",
       },
     ],
-    links: ["lattice.cache"],
+    links: ["lattice.cache", "rogue.core", "glitch.cache", "cinder.core"],
     files: {
       "core.log": {
         type: "text",
@@ -3458,6 +4542,138 @@ const LOCS = {
       },
     },
   },
+  "glitch.cache": {
+    title: "GLITCH.CACHE",
+    desc: [
+      "A cache of corrupted text frames stitched together by the Weavers.",
+      "Every file has holes. Your job is to repair the chant.",
+    ],
+    requirements: { flags: ["slipper_signal"], items: ["weaver.mark"], trust: 2 },
+    locks: [
+      {
+        prompt: "LOCK: present weaver.mark",
+        answer: "weaver.mark",
+        hint: "Download weaver.mark from weaver.den.",
+      },
+    ],
+    links: ["slipper.hole", "core.relic"],
+    files: {
+      "glitch.map": {
+        type: "text",
+        content: [
+          "GLITCH MAP",
+          "Fragments to gather:",
+          "- fragment.alpha (island.echo)",
+          "- fragment.beta   (cache)",
+          "- fragment.gamma  (cache)",
+          "- fragment.delta  (cache)",
+          "",
+          "Each fragment hides a word. Replace missing glyphs (█) with the obvious letter after decoding.",
+          "The final chant opens the rogue core.",
+        ].join("\n"),
+      },
+      "fragment.beta": {
+        type: "text",
+        cipher: true,
+        content: `ZVE${GLITCH_GLYPH}BE`,
+      },
+      "fragment.gamma": {
+        type: "text",
+        cipher: true,
+        content: `RZO${GLITCH_GLYPH}E`,
+      },
+      "fragment.delta": {
+        type: "text",
+        cipher: true,
+        content: `FGV${GLITCH_GLYPH}Y`,
+      },
+      "chant.txt": {
+        type: "text",
+        content: [
+          "GLITCH CHANT (BROKEN)",
+          "??? THE EMBER STILL THREAD",
+          "",
+          "Fill the missing word by repairing the fragments.",
+        ].join("\n"),
+      },
+      "stitch.s": {
+        type: "script",
+        script: {
+          name: "stitch",
+          sec: "MIDSEC",
+          code: [
+            "// @sec MIDSEC",
+            "const frags = ['fragment.alpha','fragment.beta','fragment.gamma','fragment.delta'];",
+            "const words = frags.map((f) => (ctx.read(f) || '').toUpperCase());",
+            "const repaired = words.map((w) => w.replace(/█/g, '?').replace(/\\s+/g, '').replace(/[^A-Z?]/g,''));",
+            "const chant = `${repaired[1] || '???'} THE ${repaired[2] || 'EMBER'} ${repaired[3] || 'STILL'} THREAD`;",
+            "ctx.print('Fragments: ' + repaired.join(' / '));",
+            "ctx.print('Chant: ' + chant.trim());",
+            "if (!chant.includes('?')) {",
+            "  ctx.flag('glitch_phrase_ready');",
+            "  ctx.print('Chant locked. Rogue core will listen.');",
+            "} else {",
+            "  ctx.print('Fill missing glyphs in your fragment files to finalize the chant.', 'warn');",
+            "}",
+          ].join("\n"),
+        },
+        content: [
+          "/* stitch.s */",
+          "function main(ctx,args){",
+          "  // Read fragment.* files from your drive and reconstruct the chant.",
+          "}",
+        ].join("\n"),
+      },
+    },
+  },
+  "rogue.core": {
+    title: "ROGUE.CORE",
+    desc: [
+      "A rogue AI kernel adapted from the relic. It mirrors your handle back at you.",
+      "Locks adapt to your trust level and your ability to repair glitches.",
+    ],
+    requirements: { flags: ["touched_relic", "glitch_phrase_ready", "forked"], items: ["relay.shard", "relic.key"], trust: 3 },
+    locks: [
+      {
+        prompt: "ROGUE: checksum(payload|HANDLE=<you>) (hex3)",
+        answer: () => expectedForChecksumPayload(ROGUE_PAYLOAD),
+        hint: "Read rogue.seed. Compute checksum like the primer.",
+      },
+      {
+        prompt: "ROGUE: repaired chant",
+        answer: "MIRROR THE EMBER STILL THREAD",
+        hint: "Collect and repair fragments in glitch.cache.",
+      },
+      {
+        prompt: "ROGUE: confirm trust tier (LEVEL3)",
+        answer: "LEVEL3",
+        hint: "Keep trust steady. Wait or anchor if heat spikes.",
+      },
+    ],
+    links: ["core.relic"],
+    files: {
+      "rogue.seed": {
+        type: "text",
+        content: [
+          "ROGUE SEED",
+          "payload=" + ROGUE_PAYLOAD,
+          "Expected: checksum(payload|HANDLE=<you>) -> hex3",
+          "The rogue mirrors you. Keep trust at level 3+ or it ignores you.",
+        ].join("\n"),
+      },
+      "rogue.log": {
+        type: "text",
+        content: [
+          "ROGUE CORE",
+          "Phase 1: checksums keep it honest.",
+          "Phase 2: chants remind it of the Drift.",
+          "Phase 3: trust proves you belong here.",
+          "",
+          "Fail any phase and trace spikes hard.",
+        ].join("\n"),
+      },
+    },
+  },
 };
 
 function getLoc(name) {
@@ -3467,11 +4683,18 @@ function getLoc(name) {
 function discover(locs) {
   const newly = [];
   locs.forEach((loc) => {
-    if (!state.discovered.has(loc)) {
+    RegionManager.noteDiscovery(loc);
+    const regionId = RegionManager.regionForNode(loc);
+    const regionLocked = regionId && !RegionManager.isRegionUnlocked(regionId);
+    if (!state.discovered.has(loc) && !regionLocked) {
       state.discovered.add(loc);
       newly.push(loc);
     }
   });
+  RegionManager.bootstrap({ silent: true });
+  if (state.region && state.region.current && !state.currentRegion) {
+    state.currentRegion = state.region.current;
+  }
   return newly;
 }
 
@@ -3483,7 +4706,9 @@ function requirementsMet(locName) {
   const items = Array.isArray(req.items) ? req.items : [];
   const okFlags = flags.every((f) => state.flags.has(String(f)));
   const okItems = items.every((i) => state.inventory.has(String(i)));
-  return okFlags && okItems;
+  const needTrust = Number(req.trust) || 0;
+  const okTrust = !needTrust || trustGate(needTrust);
+  return okFlags && okItems && okTrust;
 }
 
 function setMark(id) {
@@ -3503,8 +4728,9 @@ function listLocs() {
   Array.from(state.discovered)
     .sort()
     .forEach((locName) => {
+      if (!RegionManager.isNodeVisible(locName)) return;
       const node = getLoc(locName);
-      const unlocked = state.unlocked.has(locName) ? "OPEN" : "LOCKED";
+      const unlocked = state.unlocked.has(locName) ? "listening" : "silent";
       const title = node ? node.title : "UNKNOWN";
       writeLine(`${locName} [${unlocked}] :: ${title}`, "dim");
     });
@@ -3979,6 +5205,7 @@ function updateDriveContent(id, nextContent, meta) {
     editedBy: state.handle || "ghost",
     ...(meta && typeof meta === "object" ? meta : {}),
   };
+  validateGlitchChant();
   return { ok: true, id: key, bytes: nextBytes, used: nextUsed, max };
 }
 
@@ -4088,7 +5315,7 @@ function ensureDriveBackfill({ silent } = {}) {
       script: { name: String(name), sec: String((s && s.sec) || "FULLSEC"), code: String((s && s.code) || "") },
       content: "",
     };
-    tryStore("local", `${state.handle}.${name}.s`, entry);
+    tryStore("local", String(name).toLowerCase().endsWith(".s") ? name : `${name}.s`, entry);
   });
 
   if (!silent && (added || skippedFull) && !state.flags.has("drive_backfill_v1")) {
@@ -4225,7 +5452,8 @@ async function delCommand(args) {
     return;
   }
 
-  if (!state.userScripts || !state.userScripts[name]) {
+  const found = findUserScript(name);
+  if (!found) {
     writeLine("Not a local script. Tip: you can only delete your own scripts.", "warn");
     writeLine("Tip: for drive deletions, run `drive` then copy the exact `drive:...` id.", "dim");
     return;
@@ -4237,8 +5465,8 @@ async function delCommand(args) {
     return;
   }
 
-  delete state.userScripts[name];
-  writeLine(`deleted ${state.handle}.${name}`, "ok");
+  delete state.userScripts[found.key];
+  writeLine(`deleted ${found.key}`, "ok");
   markDirty();
 }
 
@@ -4622,6 +5850,7 @@ function readFile(name) {
   if (drive) {
     writeBlock(drive.content, "dim");
     if (drive.cipher) state.lastCipher = drive.content;
+    handleLoreSignals("drive", fileBaseName(drive.id), drive);
     trackRecentFile(driveRef(drive.id));
     return;
   }
@@ -4682,6 +5911,7 @@ function readFile(name) {
   writeBlock(entry.content, "dim");
   if (String(name || "").toLowerCase() === "primer.dat") state.flags.add("read_primer");
   if (String(name || "").toLowerCase() === "script.intro") state.flags.add("read_script_intro");
+  handleLoreSignals(state.loc, found.name, entry);
   if (entry.cipher) {
     state.lastCipher = entry.content;
   }
@@ -4751,8 +5981,22 @@ function waitTick() {
   writeLine("...waiting...", "dim");
 
   if (!fast) {
+    if (state.breach && state.breach.loc === "core.relic" && state.breach.mirrorMode === "rush") {
+      // Mirror: patient players forced to move; waiting too long adds pressure.
+      if (state.breach.mirrorDeadline && Date.now() > state.breach.mirrorDeadline) {
+        state.breach.mirrorPenalty = true;
+        state.flags.add("mirror_refused");
+        profiledTraceRise(1, "mirror linger");
+        trustAdjustHeat(1, "mirror linger");
+        state.breach.mirrorDeadline = Date.now() + 7000;
+      }
+    }
     if (state.trace > 0) state.trace -= 1;
     if (state.trace === 0) writeLine("trace is cold", "ok");
+    trustCoolDown(TRUST_COOLDOWN_ON_WAIT, "wait");
+    recordBehavior("patient");
+    recordRogueBehavior("careful");
+    watcherProfileTick();
     storyChatTick();
     markDirty();
     return;
@@ -4764,6 +6008,131 @@ function waitTick() {
     writeLine("passive scan catches movement", "warn");
     failBreach();
   }
+}
+
+function pingCommand(args) {
+  const region = state.currentRegion || (state.region && state.region.current);
+  if (region !== "introNet") {
+    writeLine("Ping drifts out; nothing notable answers.", "dim");
+    return;
+  }
+  islandPing(args);
+}
+
+function islandPing(args) {
+  const loc = state.loc || "";
+  // Safe failure: a tempting island-only button that raises heat, teaching risk without lasting punishment.
+  if (loc !== "island.grid" && loc !== "island.echo" && loc !== "home.hub") {
+    writeLine("The island beacon only hears pings nearby.", "dim");
+    return;
+  }
+  const mem = introMemoryState();
+  const now = Date.now();
+  const fast = now - (Number(mem.lastPingAt) || 0) < 2500;
+  mem.lastPingAt = now;
+  mem.pingCount = (Number(mem.pingCount) || 0) + 1;
+  mem.pingStreak = fast ? (Number(mem.pingStreak) || 0) + 1 : 1;
+
+  if (mem.pingCount === 1) writeLine("Beacon answers with a soft tone. Feels harmless.", "dim");
+  else if (fast) writeLine("Beacon heats up; echoes sharpen.", "warn");
+  else writeLine("Beacon hums warmer than before.", "warn");
+
+  // Designed stumble: spamming the beacon is tempting, but it raises heat safely to teach consequences.
+  trustAdjustHeat(1, "island ping");
+
+  if (mem.pingStreak >= 2) {
+    const gained = state.trace < state.traceMax ? 1 : 0;
+    if (gained > 0) {
+      state.trace += gained;
+      introTraceTeach("island ping");
+      watcherTraceReact("island ping");
+      writeLine(`TRACE +${gained} (${state.trace}/${state.traceMax})`, "warn");
+    }
+  }
+  if (mem.pingCount >= 2 && trustHeat() > 0) state.flags.add("intro_heat_memory"); // Trust as memory: later tone reacts.
+  markDirty();
+}
+
+function meshBridgeCommand() {
+  RegionManager.bootstrap({ silent: true });
+  if (meshBridgeActive()) {
+    writeLine("bridge already holds toward the mesh.", "dim");
+    return;
+  }
+
+  state.flags.add(MESH_BRIDGE_FLAG);
+  const targetRegion = "publicNet";
+  const def = REGION_DEFS.find((r) => r.id === targetRegion);
+  if (!state.region || typeof state.region !== "object") {
+    state.region = { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() };
+  }
+  if (!(state.region.unlocked instanceof Set)) state.region.unlocked = new Set(state.region.unlocked || []);
+  if (!(state.region.visited instanceof Set)) state.region.visited = new Set(state.region.visited || []);
+  if (!(state.region.pending instanceof Set)) state.region.pending = new Set(state.region.pending || []);
+  if (def) {
+    state.region.unlocked.add(targetRegion);
+    def.nodes.forEach((node) => state.region.pending.delete(node));
+    def.nodes.forEach((node) => {
+      if (!state.discovered.has(node)) state.discovered.add(node);
+    });
+  } else {
+    state.region.unlocked.add(targetRegion);
+  }
+  state.region.current = targetRegion;
+  state.currentRegion = targetRegion;
+  state.region.visited.add(targetRegion);
+  setZone(zoneForRegion(targetRegion));
+  onRegionEnter(def || { id: targetRegion });
+  writeLine("bridge settles; mesh hum turns distant.", "dim");
+  markDirty();
+  updateHud();
+}
+
+function stabilizeGlitch() {
+  if (!state.flags.has("glitch_fragment_seen")) {
+    writeLine("No unstable fragment nearby.", "dim");
+    return;
+  }
+  if (state.flags.has("glitch_exploiter")) {
+    writeLine("Signal remembers you pulled it apart.", "warn");
+    return;
+  }
+  if (state.flags.has("glitch_stabilizer")) {
+    writeLine("Thread already steadied.", "dim");
+    return;
+  }
+  state.flags.add("glitch_stabilizer");
+  state.flags.add("glitch_path_memory");
+  setCorruptionLevel(Math.max(0, corruptionLevel() - 1));
+  trustCoolDown(1, "glitch stabilize");
+  chatPost({ channel: "#kernel", from: "watcher", body: "you steady the crack. some lines stay readable now." });
+  // Future repair hook: stabilized fragments could be rebuilt later without re-parsing lore.
+  markDirty();
+}
+
+function spliceGlitch() {
+  if (!state.flags.has("glitch_fragment_seen")) {
+    writeLine("Nothing to splice.", "dim");
+    return;
+  }
+  if (state.flags.has("glitch_stabilizer")) {
+    writeLine("You already anchored the thread.", "warn");
+    return;
+  }
+  if (state.flags.has("glitch_exploiter")) {
+    writeLine("The fragment is already bleeding power.", "dim");
+    return;
+  }
+  state.flags.add("glitch_exploiter");
+  state.flags.add("glitch_path_memory");
+  state.gc = Math.max(0, (Number(state.gc) || 0) + 25);
+  trustAdjustHeat(2, "glitch splice");
+  profiledTraceRise(1, "glitch splice");
+  setCorruptionLevel(Math.min(3, corruptionLevel() + 1));
+  chatPost({ channel: "#kernel", from: "rogue", body: "you pull the crack wider. residue banks, eyes notice." });
+  // Future exploit hook: amplified corruption could be weaponized later.
+  maybeLockTrustProfile("glitch");
+  markDirty();
 }
 
 function siphonStatus() {
@@ -4960,8 +6329,8 @@ function resetToFreshState(keepChat) {
   state.handle = null;
   state.loc = "home.hub";
   state.gc = 120;
-  state.discovered = new Set(["home.hub", "training.node", "public.exchange", "sable.gate"]);
-  state.unlocked = new Set(["home.hub", "public.exchange"]);
+  state.discovered = new Set(["home.hub", "training.node", "public.exchange", "sable.gate", "island.grid", "trust.anchor"]);
+  state.unlocked = new Set(["home.hub", "public.exchange", "island.grid", "trust.anchor"]);
   state.inventory = new Set();
   state.drive = {};
   state.kit = {};
@@ -4987,6 +6356,7 @@ function resetToFreshState(keepChat) {
   state.tutorial = { enabled: true, stepIndex: 0, completed: new Set() };
   state.npcs = { known: new Set(["switchboard"]) };
   state.downloads = { active: null, queue: [] };
+  state.trust = { level: 2, heat: 0, lastScanAt: 0 };
   state.chat = priorChat || {
     channel: "#kernel",
     channels: new Set(["#kernel"]),
@@ -5341,6 +6711,28 @@ function tutorialNextHint() {
   tutorialAdvance();
 }
 
+function printTrustStatus(options) {
+  const opts = options || {};
+  if (opts.concise) {
+    // Narrative summary: remind players of the relationship without stats.
+    writeLine("trust holds memory; heat is noise; trace is the hand that moves.", "trust");
+    if (trustHeat() > 0) writeLine("noise is fading; anchor if you want it gone faster.", "dim");
+    if (state.trace > 0) writeLine("watchers are awake; move softly.", "warn");
+    return;
+  }
+  writeLine("TRUST STATE", "header");
+  writeLine(trustStatusLabel(), "dim");
+  if (state.trace > 0) writeLine(`trace ${state.trace}/${state.traceMax} (heat raises faster under pressure)`, "warn");
+  writeLine("Heat rises when you spam scan, fail locks, or breach without plan. Wait or anchor to cool.", "dim");
+  writeLine("Narrative path:", "header");
+  NARRATIVE_STEPS.forEach((step) => {
+    const reached = step.nodes.some((n) => state.unlocked.has(n) || state.discovered.has(n));
+    const tag = reached ? "[*]" : "[ ]";
+    writeLine(`${tag} ${step.title} :: ${step.summary}`, reached ? "ok" : "dim");
+  });
+  writeLine("Tip: connect trust.anchor to dump heat. Jobs and coolant also help.", "dim");
+}
+
 function tutorialSetEnabled(enabled) {
   state.tutorial.enabled = Boolean(enabled);
   if (state.tutorial.enabled) tutorialAdvance();
@@ -5384,6 +6776,128 @@ function listInventory() {
   }
 }
 
+// Notify when a narrative step is reached for the first time.
+function triggerNarrativeStepForLoc(locName) {
+  const step = NARRATIVE_STEPS.find((s) => (s.nodes || []).includes(locName));
+  if (!step) return;
+  const key = `narrative_step_${step.id || step.name || step.title}`;
+  if (state.flags.has(key)) return;
+  state.flags.add(key);
+  const summary = step.summary || "Signal shifts.";
+  const cue = NARRATIVE_CUES[step.id] || NARRATIVE_CUES[step.name] || summary;
+  chatPost({
+    channel: "#kernel",
+    from: "sys",
+    body: `[path] ${step.title || step.name || "route"} :: ${cue}`,
+  });
+  state.narrativeHint = `${step.title || step.name}: ${cue}`;
+  updateHud();
+  // Story progression can also be driven by reaching key locs.
+  if (state.storyState && state.storyState.current === step.id) {
+    storyAdvanceToNext(`loc:${locName}`);
+  }
+}
+
+// Occasionally alter tone based on dominant behavior (in-world, no explicit callouts).
+function behaviorToneNudge() {
+  const dom = dominantBehavior();
+  if (!dom) return;
+  const key = `behavior_tone_${dom}`;
+  if (state.flags.has(key)) return;
+  if (Math.random() < 0.5) return; // keep it occasional
+  state.flags.add(key);
+  if (dom === "noise") chatPost({ channel: "#kernel", from: "watcher", body: "your signal leaves a wake. some nodes may start whispering back." });
+  if (dom === "careful") chatPost({ channel: "#kernel", from: "switchboard", body: "quiet hands get noticed differently. some doors stay polite longer." });
+  if (dom === "aggressive") chatPost({ channel: "#kernel", from: "archivist", body: "blunt entries leave marks. archives will remember the scars." });
+  if (dom === "patient") chatPost({ channel: "#kernel", from: "watcher", body: "stillness is a kind of noise too. the net adjusts." });
+}
+
+// Narrative tie-in when trace rises: remind that watchers move because of patterns.
+function watcherTraceReact(reason) {
+  const dom = dominantBehavior();
+  const bias = behaviorBias();
+  const locked = state.flags.has("trust_profile_locked") ? state.trustProfile || dom : null;
+  // Profiling: watcher tone softens or sharpens based on cadence + recent pressure.
+  const note =
+    dom === "noise"
+      ? "same wake again; watchers move."
+      : dom === "aggressive"
+        ? bias.momentum > 1 ? "force repeats; watchers cut paths shorter." : "force echoes. watchers route toward you."
+        : dom === "patient"
+          ? bias.tranquil && trustHeat() < 3 ? "silence broke; eyes pivot, but they linger." : "silence broke; eyes pivot."
+          : bias.tranquil && (state.trace || 0) === 0
+            ? "cadence noted; routes stay loose for a beat."
+            : "cadence noted; trace routes tighten.";
+  const lockedTail =
+    locked === "noise" || locked === "aggressive"
+      ? " memory already formed."
+      : locked === "patient" || locked === "careful"
+        ? " stillness already on record."
+        : "";
+  chatPost({
+    channel: "#kernel",
+    from: "watcher",
+    body: reason ? `${note}${lockedTail ? " —" + lockedTail : ""} (${reason})` : note + (lockedTail ? " —" + lockedTail : ""),
+  });
+}
+
+// Lightweight snapshot of behavior for subtle profiling (invisible to players).
+function behaviorBias() {
+  const bp = state.behaviorProfile || {};
+  const rush = (bp.noise || 0) + (bp.aggressive || 0);
+  const calm = (bp.patient || 0) + (bp.careful || 0);
+  return {
+    rush,
+    calm,
+    momentum: rush - calm,
+    tranquil: calm > rush,
+    dom: dominantBehavior(),
+  };
+}
+
+// Profiling: when heat rises repeatedly, watchers change their phrasing to match cadence.
+function behaviorHeatTone(reason) {
+  const bias = behaviorBias();
+  const dom = bias.dom;
+  const heat = trustHeat();
+  // Avoid spam: only nudge after a few spikes and once per leaning.
+  if (heat < 2) return;
+  const key = `behavior_heat_tone_${dom || "neutral"}`;
+  if (state.flags.has(key)) return;
+  if (dom === "noise" || dom === "aggressive") {
+    if (heat >= Math.floor(TRUST_HEAT_THRESHOLD / 2)) {
+      state.flags.add(key);
+      chatPost({ channel: "#kernel", from: "watcher", body: "heat shapes your wake. some routes start locking early." });
+    }
+  } else if (dom === "patient" || dom === "careful") {
+    state.flags.add(key);
+    chatPost({ channel: "#kernel", from: "watcher", body: "pace noted. some systems give you a longer look before shutting." });
+  }
+}
+
+// Profiling: adjust trace rise subtly based on cadence. No new meters; just pacing.
+function profiledTraceRise(base, reason) {
+  const bias = behaviorBias();
+  const heat = trustHeat();
+  const currentTrace = state.trace || 0;
+  const zone = currentZone();
+  const bridgeScale = meshBridgeActive() ? 1.1 : 1;
+  const traceScale =
+    (zone === "isolated" ? 0.6 : zone === "pressure" ? 1.25 : zone === "core" ? 1.4 : zone === "unstable" ? 1.15 : 1) *
+    bridgeScale;
+  let delta = Math.max(0, Math.round(base * traceScale));
+  if (bias.momentum > 1 || bias.dom === "aggressive") {
+    if (heat >= Math.floor(TRUST_HEAT_THRESHOLD / 2) || currentTrace >= state.traceMax - 1) {
+      delta += 1; // Noisy players trigger earlier watcher pressure.
+    }
+  } else if ((bias.tranquil || bias.dom === "careful") && currentTrace === 0 && heat < TRUST_HEAT_THRESHOLD / 2) {
+    delta = Math.max(0, delta - 1); // Patient runs get a first-mistake grace.
+  }
+  state.trace = Math.min(state.traceMax, currentTrace + delta);
+  if (delta > 0) introTraceTeach(reason);
+  return delta;
+}
+
 function decodeCipher(type, payload) {
   const data = payload || state.lastCipher;
   if (!data) {
@@ -5413,7 +6927,288 @@ function decodeCipher(type, payload) {
   if (upper.includes("EMBER")) state.flags.add("ember_phrase");
   if (upper.includes("LATTICE")) state.flags.add("lattice_sigil");
   if (upper.includes("SLIPPER")) state.flags.add("slipper_signal");
+  Object.values(GLITCH_FRAGMENTS).forEach((frag) => {
+    if (upper.includes(frag.clue)) state.flags.add(`fragment_${frag.id}`);
+  });
+  if (upper.includes("ROGUE") || upper.includes("ADAPT")) state.flags.add("rogue_hint");
+  if (upper.includes("MANTLE")) state.flags.add("mantle_phrase");
+  validateGlitchChant();
   storyChatTick();
+}
+
+function recordFragment(id) {
+  const key = `fragment_${id}`;
+  state.flags.add(key);
+  if (state.storyState && state.storyState.beats) {
+    state.storyState.beats.add(key);
+  }
+  storyProgressEvent("fragment", { id });
+  validateGlitchChant();
+}
+
+// Track tendencies for the rogue core adaptation.
+function recordRogueBehavior(kind) {
+  if (!state.rogueProfile || typeof state.rogueProfile !== "object") {
+    state.rogueProfile = { noise: 0, careful: 0, brute: 0, failures: 0, outcomes: new Set() };
+  }
+  const rp = state.rogueProfile;
+  if (!(rp.outcomes instanceof Set)) rp.outcomes = new Set(rp.outcomes || []);
+  if (kind === "noise") rp.noise += 1;
+  if (kind === "careful") rp.careful += 1;
+  if (kind === "brute") rp.brute += 1;
+  if (kind === "fail") rp.failures += 1;
+}
+
+// General behavior tracking for future adaptive responses (kept invisible to the player).
+function recordBehavior(kind) {
+  if (!state.behaviorProfile || typeof state.behaviorProfile !== "object") {
+    state.behaviorProfile = { noise: 0, careful: 0, aggressive: 0, patient: 0 };
+  }
+  const bp = state.behaviorProfile;
+  if (kind === "noise") bp.noise += 1;
+  if (kind === "careful") bp.careful += 1;
+  if (kind === "aggressive") bp.aggressive += 1;
+  if (kind === "patient") bp.patient += 1;
+}
+
+function dominantBehavior() {
+  const bp = state.behaviorProfile || {};
+  const entries = [
+    ["noise", bp.noise || 0],
+    ["careful", bp.careful || 0],
+    ["aggressive", bp.aggressive || 0],
+    ["patient", bp.patient || 0],
+  ];
+  entries.sort((a, b) => b[1] - a[1]);
+  return entries[0][1] > 0 ? entries[0][0] : null;
+}
+
+// Quiet watcher profiling based on dominant behavior; stored but never shown.
+function watcherProfileTick() {
+  const dom = dominantBehavior();
+  if (!dom) return;
+  const key = `watcher_profile_${dom}`;
+  if (state.watcherProfile === dom) return;
+  state.watcherProfile = dom;
+  // Only whisper once per profile shift to keep it sparse.
+  if (!state.flags.has(key)) {
+    state.flags.add(key);
+    const lines = {
+      noise: "your cadence is familiar. watchers lean in.",
+      careful: "still hands; the net pauses, listening longer.",
+      aggressive: "marks linger where you force doors. archivists take note.",
+      patient: "long silences thread your path. some eyes stop asking if you belong.",
+    };
+    if (lines[dom]) chatPost({ channel: "#kernel", from: "watcher", body: lines[dom] });
+  }
+}
+
+function ensureStoryState() {
+  if (!state.storyState || typeof state.storyState !== "object") {
+    state.storyState = { current: "island_intro", completed: new Set(), beats: new Set(), flags: new Set(), failed: new Set() };
+  }
+  const s = state.storyState;
+  if (!(s.completed instanceof Set)) s.completed = new Set(s.completed || []);
+  if (!(s.beats instanceof Set)) s.beats = new Set(s.beats || []);
+  if (!(s.flags instanceof Set)) s.flags = new Set(s.flags || []);
+  if (!(s.failed instanceof Set)) s.failed = new Set(s.failed || []);
+  if (!s.current) s.current = "island_intro";
+  return s;
+}
+
+function storyCurrentStep() {
+  ensureStoryState();
+  return NARRATIVE_STEPS.find((s) => s.id === state.storyState.current) || NARRATIVE_STEPS[0];
+}
+
+function storyAdvanceToNext(reason) {
+  ensureStoryState();
+  const current = storyCurrentStep();
+  if (current && current.id) state.storyState.completed.add(current.id);
+  const nextIdx = narrativeStepIndex(current ? current.id : null) + 1;
+  const next = NARRATIVE_STEPS[nextIdx] || current;
+  state.storyState.current = next.id || current.id;
+  const cue = NARRATIVE_CUES[next.id] || NARRATIVE_CUES[next.name] || next.summary || "signal moves";
+  chatPost({
+    channel: "#kernel",
+    from: "sys",
+    body: `[path] ${next.title || next.name || "route"} :: ${cue}`,
+  });
+  state.narrativeHint = `${next.title || next.name}: ${cue}`;
+  if (reason) state.storyState.flags.add(`advance:${reason}`);
+  markDirty();
+}
+
+// Lightweight dispatcher: move the story when meaningful actions land.
+function storyProgressEvent(kind, payload) {
+  ensureStoryState();
+  const current = storyCurrentStep();
+  const nodes = (current && current.nodes) || [];
+
+  if (kind === "breach" && payload && nodes.includes(payload.loc)) {
+    storyAdvanceToNext(`breach:${payload.loc}`);
+    return;
+  }
+
+  if (kind === "chant_ready") {
+    state.storyState.flags.add("chant_ready");
+    if (current && current.id === "glitch_arc") storyAdvanceToNext("chant");
+    return;
+  }
+
+  if (kind === "trust_anchor_heat") {
+    state.storyState.flags.add("anchor_coolant");
+    if (current && current.id === "trust_pressure") storyAdvanceToNext("anchor");
+    return;
+  }
+
+  if (kind === "corruption" && payload && payload.level >= 2) {
+    state.storyState.flags.add("corruption_seen");
+    if (current && current.id === "glitch_arc") storyAdvanceToNext("corruption");
+    return;
+  }
+
+  if (kind === "fragment" && current && current.id === "glitch_arc") {
+    if (state.storyState.beats.size >= 2) {
+      storyAdvanceToNext("fragments");
+    }
+    return;
+  }
+
+  if (kind === "core_ready" && current && current.id === "rogue_finale") {
+    storyAdvanceToNext("rogue_ready");
+  }
+}
+
+function fragmentTextToWord(text) {
+  return String(text || "")
+    .replace(new RegExp(GLITCH_GLYPH, "g"), "")
+    .replace(/[^A-Z]/gi, "")
+    .toUpperCase();
+}
+
+// As corruption rises or trust dips, fragments momentarily reveal more.
+function softenFragmentCorruption(text) {
+  const clarity = corruptionLevel() + (trustLevel() <= 2 ? 1 : 0);
+  if (clarity <= 0) return text;
+  const ratio = Math.min(0.6, clarity * 0.15);
+  return String(text || "").replace(new RegExp(GLITCH_GLYPH, "g"), (m) => (Math.random() < ratio ? "" : m));
+}
+
+function glitchFragmentsFromDrive() {
+  const out = [];
+  Object.keys(state.drive || {}).forEach((id) => {
+    const entry = state.drive[id];
+    if (!entry) return;
+    const name = entry.name || id;
+    const m = String(name || "").match(/fragment\.(alpha|beta|gamma|delta)/i);
+    if (m && m[1]) {
+      out.push({ id: m[1].toLowerCase(), text: softenFragmentCorruption(entry.content), source: id });
+    }
+  });
+  return out;
+}
+
+// Validate glitch phrase assembly: all fragments must be cleaned (no GLITCH_GLYPH)
+// and contribute to the chant. Only then should glitch_phrase_ready be set.
+function validateGlitchChant() {
+  const entries = glitchFragmentsFromDrive();
+  const cleaned = new Map();
+  entries.forEach((entry) => {
+    if (!String(entry.text || "").includes(GLITCH_GLYPH)) {
+      cleaned.set(entry.id, fragmentTextToWord(entry.text));
+    }
+  });
+  const haveAll = GLITCH_FRAGMENT_IDS.every((id) => cleaned.has(id));
+  const chantWords = {
+    beta: cleaned.get("beta") || "?",
+    gamma: cleaned.get("gamma") || "?",
+    delta: cleaned.get("delta") || "?",
+  };
+  const chant = `${chantWords.beta} THE ${chantWords.gamma} ${chantWords.delta} THREAD`.trim();
+
+  // Player must reconstruct intentionally (scratchpad or drive) — no auto-complete.
+  const attempt = findChantAttempt();
+  const exact = attempt && attempt === chant;
+  const near =
+    attempt &&
+    !exact &&
+    chantWords.beta !== "?" &&
+    chantWords.gamma !== "?" &&
+    chantWords.delta !== "?" &&
+    ["THE", "THREAD"].every((w) => attempt.includes(w));
+
+  if (haveAll && exact) {
+    if (!state.flags.has("glitch_phrase_ready")) {
+      chatPost({
+        channel: "#kernel",
+        from: "weaver",
+        body: `Chant stitched: ${chant}`,
+      });
+    }
+    state.flags.add("glitch_phrase_ready");
+    state.flags.add("glitch_phrase_clean");
+    state.flags.add("glitch_chant_value");
+    state.glitchChant = chant;
+    storyProgressEvent("chant_ready");
+    recordRogueBehavior("careful");
+  } else {
+    // Near-miss: subtle corruption and slight heat bump (trace when very close), no explicit “wrong”.
+    if (attempt && haveAll) {
+      writeLine("chant scatters in the buffer", "warn");
+      trustAdjustHeat(1, "chant_miss");
+      if (near) state.trace = Math.min(state.traceMax, (state.trace || 0) + 1);
+      if (near) watcherTraceReact("chant noise");
+      recordRogueBehavior("brute");
+    }
+    state.flags.delete("glitch_phrase_ready");
+    state.flags.delete("glitch_phrase_clean");
+    state.flags.delete("glitch_chant_value");
+    state.glitchChant = null;
+  }
+}
+
+function handleLoreSignals(locName, fileName, entry) {
+  const text = String((entry && entry.content) || "");
+  const upper = text.toUpperCase();
+  if (fileName.toLowerCase().includes("fragment")) {
+    const id = fileName.match(/fragment\.(alpha|beta|gamma|delta)/i);
+    if (id && id[1]) {
+      recordFragment(id[1].toLowerCase());
+      state.flags.add("glitch_fragment_seen");
+      if (!glitchChoiceTaken()) {
+        chatPost({
+          channel: "#kernel",
+          from: "watcher",
+          body: "fragment flexes. you could steady the thread or pull it harder.",
+        });
+      }
+      const softer = softenFragmentCorruption(text);
+      if (softer !== text) {
+        const stable = state.flags.has("glitch_stabilizer");
+        const show = stable ? softer : text;
+        if (stable) {
+          // Stabilize path: clearer lore, future repair could build here.
+          writeLine("static thins: " + show, "dim");
+        } else {
+          writeLine("fragment crackles: " + show, "warn");
+        }
+      }
+      if (state.flags.has("glitch_exploiter")) setCorruptionLevel(Math.min(3, corruptionLevel() + 1));
+    }
+  }
+  Object.values(GLITCH_FRAGMENTS).forEach((frag) => {
+    if (upper.includes(frag.clue)) recordFragment(frag.id);
+  });
+  if (text.includes(GLITCH_GLYPH)) state.flags.add("corruption");
+  if (locName === "trust.anchor") trustCoolDown(2, "anchor read");
+  if (locName === "glitch.cache" && upper.includes("CHANT")) state.flags.add("glitch_chant_known");
+  if (locName === "glitch.cache") setCorruptionLevel(Math.max(corruptionLevel(), 1));
+  if (upper.includes("NARRATIVE STEP")) state.flags.add("narrative_brief_seen");
+  if (upper.includes("ROGUE") || upper.includes("ADAPTIVE")) state.flags.add("rogue_hint");
+  if (upper.includes("MANTLE")) state.flags.add("mantle_phrase");
+  if (locName === "rogue.core" && fileName.toLowerCase() === "rogue.seed") state.flags.add("rogue_seed_read");
+  validateGlitchChant();
 }
 
 const trustScripts = {
@@ -5423,6 +7218,13 @@ const trustScripts = {
     sec: "FULLSEC",
     run: (ctx) => {
       ctx.print("Scanning...");
+      const now = Date.now();
+      const last = Number(state.trust && state.trust.lastScanAt) || 0;
+      if (now - last < 4000) {
+        ctx.print("Noise complains about rapid scans (trust heat +1).");
+        trustAdjustHeat(1, "rapid scan");
+      }
+      if (state.trust) state.trust.lastScanAt = now;
       listLocs();
       setMark("mark.scan");
     },
@@ -5634,17 +7436,8 @@ function resolveScript(name) {
     return state.kit[kitName] || null;
   }
 
-  if (name.includes(".")) {
-    const prefix = `${state.handle}.`;
-    if (state.handle && name.startsWith(prefix)) {
-      const local = name.slice(prefix.length);
-      const s = state.userScripts[local];
-      if (s) return { ...s, owner: state.handle };
-    }
-    return null;
-  }
-
-  if (state.userScripts[name]) return { ...state.userScripts[name], owner: state.handle };
+  const found = findUserScript(name);
+  if (found) return { ...found.script, owner: state.handle };
   if (state.kit[name]) return state.kit[name];
   return null;
 }
@@ -5686,6 +7479,25 @@ function buildContext(currentScript, outputKind) {
     hasItem: (item) => state.inventory.has(item),
     call: (scriptName, scriptArgs) => runScript(scriptName, scriptArgs, currentScript),
     loc: () => state.loc,
+    gc: (amount) => {
+      const n = Math.max(0, Number(amount) || 0);
+      state.gc = Math.max(0, Math.floor((Number(state.gc) || 0) + n));
+      markDirty();
+    },
+    adjustHeat: (delta, reason) => trustAdjustHeat(Number(delta) || 0, reason || "script"),
+    coolHeat: (amount, reason) => trustCoolDown(Math.max(0, Number(amount) || 0), reason || "script"),
+    behavior: (kind) => {
+      recordBehavior(kind);
+      if (kind === "noise" || kind === "aggressive") recordRogueBehavior("noise");
+      if (kind === "careful") recordRogueBehavior("careful");
+    },
+    traceBump: (reason) => profiledTraceRise(1, reason || "script"),
+    corruptionLevel: () => corruptionLevel(),
+    lastWaitMs: () => {
+      if (!state.wait || typeof state.wait.lastAt !== "number") return null;
+      return Date.now() - state.wait.lastAt;
+    },
+    post: (channel, from, body) => chatPost({ channel: channel || "#kernel", from: from || "watcher", body: body || "" }),
   };
 }
 
@@ -5758,6 +7570,21 @@ function runScript(name, args, caller) {
 function updateHud() {
   gcSpan.textContent = state.gc;
   traceSpan.textContent = `${state.trace}/${state.traceMax}`;
+  // Trace awareness: subtle hue shift near the indicator only.
+  document.body.classList.remove("trace-warm", "trace-hot", "trace-critical");
+  const traceRatio = state.traceMax > 0 ? state.trace / state.traceMax : 0;
+  if (traceRatio >= 0.75) document.body.classList.add("trace-critical");
+  else if (traceRatio >= 0.45) document.body.classList.add("trace-hot");
+  else if (traceRatio >= 0.25) document.body.classList.add("trace-warm");
+  if (traceRatio >= 0.85) document.body.classList.add("trace-nearmax");
+  else document.body.classList.remove("trace-nearmax");
+
+  // Trust tone: mild tint on HUD based on trust level.
+  document.body.classList.remove("trust-low", "trust-high");
+  const t = trustLevel();
+  if (t <= 1) document.body.classList.add("trust-low");
+  else if (t >= 3) document.body.classList.add("trust-high");
+
   const dl = state.downloads && (state.downloads.active || state.downloads.queue.length);
   let dlStatus = "";
   if (state.downloads.active) {
@@ -5772,8 +7599,9 @@ function updateHud() {
     dlStatus = ` | dl queue ${state.downloads.queue.length}`;
   }
 
+  const trustStatus = state.handle ? ` | ${trustStatusLabel()}` : "";
   statusLine.textContent = state.handle
-    ? `${state.handle}@${state.loc}${dlStatus}`
+    ? `${state.handle}@${state.loc}${trustStatus}${dlStatus}`
     : "enter handle or type load";
   prompt.textContent = state.editor ? "edit>" : ">>";
 
@@ -5783,6 +7611,7 @@ function updateHud() {
       hint.textContent = `Objective: ${current.title} — ${current.hint}`;
     } else {
       hint.textContent =
+        state.narrativeHint ||
         "Type `help` for commands. Use `scripts` to list available scripts.";
     }
   }
@@ -5790,6 +7619,10 @@ function updateHud() {
 
 function storyChatTick() {
   if (!state.handle) return;
+  RegionManager.bootstrap({ silent: true });
+  setZone(zoneForRegion(state.currentRegion || (state.region && state.region.current) || "isolated"));
+  triggerNarrativeStepForLoc(state.loc);
+  behaviorToneNudge();
   if (state.loc === "home.hub" && !state.flags.has("chat_intro")) {
     state.flags.add("chat_intro");
     chatPost({
@@ -5806,6 +7639,11 @@ function storyChatTick() {
       from: "switchboard",
       body: "Training node cleared. Route to the exchange and pull tools.",
     });
+    if (!state.flags.has("tutorial_training_done")) {
+      state.flags.add("tutorial_training_done");
+      const added = discover(["island.echo"]);
+      if (added.length) chatPost({ channel: "#kernel", from: "switchboard", body: "Island echo opened. `connect island.echo` for extra guidance." });
+    }
     return;
   }
   if (state.unlocked.has("pier.gate") && !state.flags.has("chat_pier_gate")) {
@@ -5844,6 +7682,17 @@ function storyChatTick() {
       body: "If you can read the sigil, the lattice can read you back.",
     });
   }
+  if (state.unlocked.has("lattice.cache") && trustLevel() >= 2 && !state.flags.has("chat_deep_slate")) {
+    state.flags.add("chat_deep_slate");
+    const added = discover(["deep.slate"]);
+    if (added.length) {
+      chatPost({
+        channel: "#kernel",
+        from: "archivist",
+        body: "Depth slate exposed: `deep.slate` (needs trust 2 + lattice sigil).",
+      });
+    }
+  }
   if (state.unlocked.has("lattice.cache") && !state.flags.has("chat_act3")) {
     state.flags.add("chat_act3");
     if (!state.flags.has("corrupt_act3")) {
@@ -5879,6 +7728,11 @@ function storyChatTick() {
     });
     return;
   }
+  if (trustLevel() <= 1 && !state.flags.has("chat_trust_low")) {
+    state.flags.add("chat_trust_low");
+    const added = discover(["trust.anchor"]);
+    if (added.length) chatPost({ channel: "#kernel", from: "switchboard", body: "Heat spike. Anchor open: `connect trust.anchor` to cool." });
+  }
   if (state.flags.has("slipper_signal") && !state.flags.has("chat_slipper")) {
     state.flags.add("chat_slipper");
     const added = discover(["slipper.hole"]);
@@ -5887,6 +7741,18 @@ function storyChatTick() {
         channel: "#kernel",
         from: "switchboard",
         body: "Beacon decoded. A thin spot opened: `slipper.hole`.",
+      });
+    }
+    return;
+  }
+  if (state.flags.has("slipper_signal") && state.inventory.has("weaver.mark") && !state.flags.has("chat_glitch_cache")) {
+    state.flags.add("chat_glitch_cache");
+    const added = discover(["glitch.cache"]);
+    if (added.length) {
+      chatPost({
+        channel: "#kernel",
+        from: "weaver",
+        body: "You hold thread and mask. A corrupted cache opened: `glitch.cache`. Bring patience.",
       });
     }
     return;
@@ -5904,6 +7770,28 @@ function storyChatTick() {
       body: "DM me for work: `tell juniper work`.",
     });
   }
+  if (state.flags.has("glitch_phrase_ready") && state.flags.has("touched_relic") && !state.flags.has("chat_rogue_ready")) {
+    state.flags.add("chat_rogue_ready");
+    const added = discover(["rogue.core"]);
+    if (added.length) {
+      chatPost({
+        channel: "#kernel",
+        from: "archivist",
+        body: "You rebuilt the chant. The rogue core is exposed: `breach rogue.core` when trust is steady.",
+      });
+    }
+  }
+  if (state.flags.has("glitch_phrase_ready") && state.inventory.has("cinder.token") && !state.flags.has("chat_cinder_ready")) {
+    state.flags.add("chat_cinder_ready");
+    const added = discover(["cinder.core"]);
+    if (added.length) {
+      chatPost({
+        channel: "#kernel",
+        from: "archivist",
+        body: "Depth token forged. Optional finale: `cinder.core` (chant + checksum + mantle).",
+      });
+    }
+  }
 }
 
 function listScripts() {
@@ -5917,7 +7805,7 @@ function listScripts() {
   if (!userNames.length) writeLine("(none)", "dim");
   userNames
     .sort()
-    .forEach((name) => writeLine(`${state.handle}.${name} [${state.userScripts[name].sec}]`, "dim"));
+    .forEach((name) => writeLine(`${name} [${state.userScripts[name].sec}]`, "dim"));
 
   writeLine("KIT SCRIPTS", "header");
   const kitNames = Object.keys(state.kit);
@@ -5932,7 +7820,9 @@ function canAttemptLoc(locName) {
   const req = (loc && loc.requirements) || {};
   const missingItems = (req.items || []).filter((item) => !state.inventory.has(item));
   const missingFlags = (req.flags || []).filter((flag) => !state.flags.has(flag));
-  return { ok: !missingItems.length && !missingFlags.length, missingItems, missingFlags };
+  const trustNeed = Number(req.trust) || 0;
+  const missingTrust = trustNeed && !trustGate(trustNeed) ? trustNeed : null;
+  return { ok: !missingItems.length && !missingFlags.length && !missingTrust, missingItems, missingFlags, missingTrust };
 }
 
 function startBreach(locName) {
@@ -5951,9 +7841,51 @@ function startBreach(locName) {
     writeLine("Loc not found.", "error");
     return;
   }
+  if (locName === "rogue.core") {
+    if (!state.flags.has("glitch_phrase_ready")) {
+      writeLine("rogue.core ignores you; chant incomplete.", "warn");
+      return;
+    }
+    if (!trustGate(3)) {
+      writeLine("rogue.core watches your trust level and discards your ping.", "warn");
+      return;
+    }
+    if (!state.flags.has("rogue_seed_read")) {
+      writeLine("rogue.core pulses back a checksum request. Read rogue.seed first.", "warn");
+      return;
+    }
+    rogueCoreAdaptiveIntro();
+    chatPost({
+      channel: "#kernel",
+      from: "archivist",
+      body: "Rogue ritual: trust steady, chant whole, checksum ready. Do not rush the lock stack.",
+    });
+    rogueCoreProfiledPressure();
+  }
+  RegionManager.bootstrap({ silent: true });
+  state.currentRegion = state.region.current;
+  const regionGate = RegionManager.canAccessNode(locName);
+  if (!regionGate.ok) {
+    writeLine(`signal refused :: ${regionGate.name} stays dark (${regionGate.hint || "route cooling"})`, "warn");
+    chatPost({
+      channel: "#kernel",
+      from: "switchboard",
+      body: `Route sealed: ${regionGate.name}. Clear prior signals before it will answer.`,
+    });
+    return;
+  }
   if (!state.discovered.has(locName)) {
     writeLine("Loc not discovered.", "warn");
     return;
+  }
+  if (locName === "archives.arc" && state.flags.has("trust_profile_locked")) {
+    // Future consequence: trust memory nudges access pressure without blocking.
+    if (state.trustProfile === "noise" || state.trustProfile === "aggressive") {
+      trustAdjustHeat(1, "memory push");
+      profiledTraceRise(1, "memory push");
+    } else if (state.trustProfile === "patient" || state.trustProfile === "careful") {
+      trustCoolDown(1, "memory ease");
+    }
   }
   if (state.unlocked.has(locName)) {
     writeLine("Loc already unlocked.", "dim");
@@ -5968,12 +7900,14 @@ function startBreach(locName) {
     return;
   }
   state.breach = { loc: locName, index: 0, pressure: null };
+  trustAdjustHeat(1, "breach start");
   writeLine(`BREACHING ${locName}`, "header");
   writeLine(`sys::breach.start ${locName}`, "trust");
   if (!loc.locks.length) {
     writeLine("No locks detected. Access open.", "ok");
     state.unlocked.add(locName);
     setMark("mark.breach");
+    storyProgressEvent("breach", { loc: locName });
     state.breach = null;
     return;
   }
@@ -5981,18 +7915,53 @@ function startBreach(locName) {
   // Boss-like pressure: the warden pulses trace while you're inside the core lock stack.
   if (locName === "core.relic") {
     setCorruptionLevel(Math.max(corruptionLevel(), 2));
+    const bias = behaviorBias();
+    const basePulseMs = 7000;
+    // Profiling: noisier cadences feel more pressure; patient runs get a longer beat.
+    const locked = state.flags.has("trust_profile_locked") ? state.trustProfile : null;
+    const exploitTilt = state.flags.has("glitch_exploiter");
+    const stabilizer = state.flags.has("glitch_stabilizer");
+    const pulseAdjust =
+      bias.momentum > 1 || locked === "aggressive" || locked === "noise"
+        ? -1200
+        : bias.tranquil || locked === "patient" || locked === "careful"
+          ? 900
+          : 0;
+    const exploitAdjust = exploitTilt ? -400 : 0;
+    const stabilizeAdjust = stabilizer ? 400 : 0;
+    const pulseMs = Math.max(5200, basePulseMs + pulseAdjust + exploitAdjust + stabilizeAdjust);
     state.breach.pressure = window.setInterval(() => {
       if (!state.breach || state.breach.loc !== "core.relic") return;
       writeLine("WARDEN PULSE :: trace rising", "warn");
       failBreach();
-    }, 7000);
+    }, pulseMs);
+
+    // Mirror encounter: push players out of their dominant cadence for this relic breach.
+    const dom = dominantBehavior();
+    const mirror =
+      (locked === "noise" || locked === "aggressive" || dom === "noise" || dom === "aggressive" || exploitTilt) ? "stillness" : "rush";
+    state.breach.mirrorMode = mirror;
+    state.breach.mirrorDeadline = Date.now() + (mirror === "rush" ? 8500 : 0);
+    state.breach.lastActionAt = Date.now();
+    state.breach.mirrorAdapted = false;
+    state.breach.mirrorPenalty = false;
+    if (mirror === "stillness") {
+      chatPost({ channel: "#kernel", from: "watcher", body: "you don’t usually wait." });
+    } else {
+      chatPost({ channel: "#kernel", from: "watcher", body: "you linger; the signal decays fast." });
+    }
   }
 
   writeLine(loc.locks[0].prompt, "warn");
 }
 
 function failBreach() {
-  state.trace += 1;
+  const traceDelta = profiledTraceRise(1, "lock fail");
+  trustAdjustHeat(1, "failed lock");
+  recordRogueBehavior("fail");
+  recordRogueBehavior("brute");
+  recordBehavior("aggressive");
+  watcherTraceReact("lock fail");
   if (state.trace >= state.traceMax) {
     writeLine("TRACE LIMIT HIT. CONNECTION DROPPED.", "error");
 
@@ -6031,13 +8000,42 @@ function failBreach() {
     markDirty();
     return;
   }
-  writeLine(`TRACE +1 (${state.trace}/${state.traceMax})`, "warn");
+  const traceMsg =
+    traceDelta > 0 ? `TRACE +${traceDelta} (${state.trace}/${state.traceMax})` : `TRACE steady (${state.trace}/${state.traceMax})`;
+  writeLine(traceMsg, traceDelta > 0 ? "warn" : "dim");
 }
 
 function unlockAttempt(answer) {
   if (!state.breach) {
     writeLine("No active breach.", "warn");
     return;
+  }
+  if (state.breach.loc === "core.relic" && state.breach.mirrorMode === "stillness") {
+    const now = Date.now();
+    const delta = now - (Number(state.breach.lastActionAt) || 0);
+    if (delta < 2500) {
+      state.breach.mirrorPenalty = true;
+      state.flags.add("mirror_refused");
+      profiledTraceRise(1, "mirror haste");
+      trustAdjustHeat(1, "mirror haste");
+      writeLine("warden mirrors your haste.", "warn");
+    } else if (delta >= 3200 && !state.breach.mirrorAdapted) {
+      state.breach.mirrorAdapted = true;
+      state.flags.add("mirror_adapted");
+    }
+    state.breach.lastActionAt = now;
+  }
+  if (state.breach.loc === "core.relic" && state.breach.mirrorMode === "rush") {
+    const now = Date.now();
+    if (state.breach.mirrorDeadline && now > state.breach.mirrorDeadline) {
+      state.breach.mirrorPenalty = true;
+      state.flags.add("mirror_refused");
+      profiledTraceRise(1, "mirror linger");
+      trustAdjustHeat(1, "mirror linger");
+      writeLine("signal frays while you linger.", "warn");
+      state.breach.mirrorDeadline = now + 7000;
+    }
+    state.breach.lastActionAt = now;
   }
   const pressure = state.breach.pressure;
   const loc = getLoc(state.breach.loc);
@@ -6058,12 +8056,21 @@ function unlockAttempt(answer) {
   if (normalized.toUpperCase() === expected.toUpperCase()) {
     writeLine("LOCK CLEARED", "ok");
     writeLine("sys::lock.cleared", "trust");
+    if (state.trace === 0 && trustHeat() === 0) recordRogueBehavior("careful");
     state.breach.index += 1;
+    if (state.breach.loc === "core.relic" && state.breach.mirrorMode === "rush") {
+      state.breach.mirrorDeadline = Date.now() + 8000;
+      if (!state.breach.mirrorAdapted) {
+        state.breach.mirrorAdapted = true;
+        state.flags.add("mirror_adapted");
+      }
+    }
     if (state.breach.index >= loc.locks.length) {
       const unlockedLoc = state.breach.loc;
       writeLine("STACK CLEARED. ACCESS OPEN.", "ok");
       state.unlocked.add(unlockedLoc);
       setMark("mark.breach");
+      storyProgressEvent("breach", { loc: unlockedLoc });
       if (pressure) window.clearInterval(pressure);
       writeLine(`sys::breach.success ${unlockedLoc}`, "trust");
       state.breach = null;
@@ -6089,13 +8096,27 @@ function connectLoc(locName) {
     writeLine("Loc not found.", "error");
     return;
   }
+  RegionManager.bootstrap({ silent: true });
+  state.currentRegion = state.region.current;
+  const regionGate = RegionManager.canAccessNode(locName);
+  if (!regionGate.ok) {
+    writeLine(`signal refused :: ${regionGate.name} stays dark (${regionGate.hint || "route cooling"})`, "warn");
+    chatPost({
+      channel: "#kernel",
+      from: "switchboard",
+      body: `Route sealed: ${regionGate.name}. Clear prior signals before it will answer.`,
+    });
+    return;
+  }
   if (!requirementsMet(locName)) {
     writeLine("Requirements not met for this loc.", "warn");
     const req = loc.requirements || {};
     const flags = Array.isArray(req.flags) ? req.flags : [];
     const items = Array.isArray(req.items) ? req.items : [];
+    const trustReq = req.trust || null;
     if (flags.length) writeLine("Need flags: " + flags.join(", "), "dim");
     if (items.length) writeLine("Need items: " + items.join(", "), "dim");
+    if (trustReq) writeLine("Need trust level: " + trustReq, "dim");
     return;
   }
 
@@ -6116,6 +8137,11 @@ function connectLoc(locName) {
 
   state.loc = locName;
   showLoc();
+  RegionManager.enterRegionByNode(locName);
+  triggerNarrativeStepForLoc(locName);
+  if (locName === "trust.anchor" && trustHeat() >= TRUST_HEAT_THRESHOLD - 1) {
+    storyProgressEvent("trust_anchor_heat");
+  }
   if (!state.flags.has("seen_" + locName)) {
     state.flags.add("seen_" + locName);
     if (locName === "monument.beacon") {
@@ -6220,7 +8246,8 @@ function setEditor(name, options) {
     writeLine("            :i N <text> (insert), :a N <text> (append), :clear", "dim");
     return;
   }
-  writeLine(`Editing ${state.handle}.${name}`, "dim");
+  const canon = canonicalScriptName(name);
+  writeLine(`Editing ${canon.canonical}`, "dim");
   writeLine("Tip: add `// @sec FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC`", "dim");
   writeLine("Editor cmds: :p (print), :d N (delete), :r N <text> (replace)", "dim");
   if (prefill) writeLine("Loaded content. Edit, then `:wq`.", "dim");
@@ -6274,14 +8301,14 @@ function finishEditor(save) {
   }
   const match = code.match(/@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i);
   const sec = match ? match[1].toUpperCase() : "FULLSEC";
-  state.userScripts[editor.name] = { owner: state.handle, name: editor.name, sec, code };
-  writeLine(`Saved ${state.handle}.${editor.name} [${sec}]`, "ok");
+  const savedKey = upsertUserScript(editor.name, sec, code);
+  writeLine(`Saved ${savedKey} [${sec}]`, "ok");
   // Mirror local script into drive so size matters.
-  const mirrored = storeDriveCopy("local", `${state.handle}.${editor.name}.s`, {
+  const mirrored = storeDriveCopy("local", savedKey, {
     type: "script",
-    script: { name: editor.name, sec, code },
+    script: { name: savedKey, sec, code },
   });
-  void mirrorUserScriptToLocalFolder(editor.name, code);
+  void mirrorUserScriptToLocalFolder(savedKey, code);
   if (!mirrored.ok) {
     writeLine("sys::drive full (script not mirrored)", "warn");
     writeLine("Tip: buy/install `upg.drive_ext` or delete with `del drive:...`", "dim");
@@ -6310,6 +8337,7 @@ function getSaveData() {
     siphon: state.siphon,
     lockoutUntil: state.lockoutUntil,
     wait: state.wait,
+    introMemory: state.introMemory,
     tutorial: {
       enabled: state.tutorial.enabled,
       stepIndex: state.tutorial.stepIndex,
@@ -6328,6 +8356,36 @@ function getSaveData() {
     traceMax: state.traceMax,
     lastCipher: state.lastCipher,
     localSync: state.localSync,
+    trust: state.trust,
+    trustProfile: state.trustProfile,
+    zone: state.zone,
+    region: {
+      current: state.region && state.region.current ? state.region.current : null,
+      unlocked: Array.from((state.region && state.region.unlocked) || []),
+      visited: Array.from((state.region && state.region.visited) || []),
+      pending: Array.from((state.region && state.region.pending) || []),
+    },
+    currentRegion: state.currentRegion || (state.region && state.region.current) || null,
+    storyState: {
+      current: state.storyState && state.storyState.current ? state.storyState.current : "island_intro",
+      completed: Array.from((state.storyState && state.storyState.completed) || []),
+      beats: Array.from((state.storyState && state.storyState.beats) || []),
+      flags: Array.from((state.storyState && state.storyState.flags) || []),
+      failed: Array.from((state.storyState && state.storyState.failed) || []),
+    },
+    rogueProfile: {
+      noise: state.rogueProfile ? state.rogueProfile.noise || 0 : 0,
+      careful: state.rogueProfile ? state.rogueProfile.careful || 0 : 0,
+      brute: state.rogueProfile ? state.rogueProfile.brute || 0 : 0,
+      failures: state.rogueProfile ? state.rogueProfile.failures || 0 : 0,
+      outcomes: Array.from((state.rogueProfile && state.rogueProfile.outcomes) || []),
+    },
+    behaviorProfile: {
+      noise: state.behaviorProfile ? state.behaviorProfile.noise || 0 : 0,
+      careful: state.behaviorProfile ? state.behaviorProfile.careful || 0 : 0,
+      aggressive: state.behaviorProfile ? state.behaviorProfile.aggressive || 0 : 0,
+      patient: state.behaviorProfile ? state.behaviorProfile.patient || 0 : 0,
+    },
   };
 }
 
@@ -6350,6 +8408,7 @@ function loadState(options) {
   }
   const parsed = JSON.parse(raw);
   const data = parsed && parsed.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  const hasRegionData = !!(data.region && typeof data.region === "object");
   state.handle = data.handle;
   state.loc = data.loc || "home.hub";
   state.gc = data.gc ?? 0;
@@ -6366,8 +8425,22 @@ function loadState(options) {
       : { locs: [], files: [] };
   state.kit = data.kit || {};
   state.userScripts = data.userScripts || {};
+  const rebuiltScripts = {};
+  Object.keys(state.userScripts || {}).forEach((key) => {
+    const entry = state.userScripts[key] || {};
+    const sec = (entry.sec || "FULLSEC").toUpperCase();
+    const code = String(entry.code || entry.content || "");
+    const canonical = canonicalScriptName(entry.name || key);
+    const existingKey = Object.keys(rebuiltScripts).find(
+      (k) => scriptBaseFromKey(k) === scriptBaseFromKey(canonical.canonical)
+    );
+    const targetKey = existingKey || canonical.canonical;
+    rebuiltScripts[targetKey] = { owner: state.handle, name: targetKey, sec, code: code || rebuiltScripts[targetKey]?.code || "" };
+  });
+  state.userScripts = rebuiltScripts;
   state.uploads = data.uploads && typeof data.uploads === "object" ? data.uploads : {};
   state.flags = new Set(data.flags || []);
+  if (!hasRegionData) state.flags.add("region_legacy_backfill");
   state.marks = new Set(data.marks || []);
   state.upgrades = new Set(data.upgrades || []);
   state.driveMax = Math.min(
@@ -6399,6 +8472,19 @@ function loadState(options) {
     data.wait && typeof data.wait === "object"
       ? { lastAt: Number(data.wait.lastAt) || 0, streak: Number(data.wait.streak) || 0 }
       : state.wait || { lastAt: 0, streak: 0 };
+  state.trustProfile = data.trustProfile || null;
+  state.zone = normalizeZone(data.zone || state.zone || "isolated");
+  state.introMemory =
+    data.introMemory && typeof data.introMemory === "object"
+      ? {
+          pingCount: Number(data.introMemory.pingCount) || 0,
+          pingStreak: Number(data.introMemory.pingStreak) || 0,
+          lastPingAt: Number(data.introMemory.lastPingAt) || 0,
+          heatSpikes: Number(data.introMemory.heatSpikes) || 0,
+          traceNotice: !!data.introMemory.traceNotice,
+          patienceNotice: !!data.introMemory.patienceNotice,
+        }
+      : state.introMemory || { pingCount: 0, pingStreak: 0, lastPingAt: 0, heatSpikes: 0, traceNotice: false, patienceNotice: false };
   if (data.tutorial) {
     state.tutorial.enabled = data.tutorial.enabled !== false;
     state.tutorial.completed = new Set(data.tutorial.completed || []);
@@ -6420,6 +8506,53 @@ function loadState(options) {
   state.trace = data.trace || 0;
   state.traceMax = data.traceMax || 4;
   state.lastCipher = data.lastCipher || null;
+  state.trust =
+    data.trust && typeof data.trust === "object"
+      ? {
+          level: Math.max(TRUST_MIN_LEVEL, Math.min(TRUST_MAX_LEVEL, Number(data.trust.level) || 2)),
+          heat: Math.max(0, Number(data.trust.heat) || 0),
+          lastScanAt: Number(data.trust.lastScanAt) || 0,
+        }
+      : { level: 2, heat: 0, lastScanAt: 0 };
+  state.region =
+    data.region && typeof data.region === "object"
+      ? {
+          current: data.region.current || null,
+          unlocked: new Set(data.region.unlocked || []),
+          visited: new Set(data.region.visited || []),
+          pending: new Set(data.region.pending || []),
+        }
+      : state.region || { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() };
+  state.currentRegion = data.currentRegion || (state.region && state.region.current) || null;
+  state.storyState =
+    data.storyState && typeof data.storyState === "object"
+      ? {
+          current: data.storyState.current || "island_intro",
+          completed: new Set(data.storyState.completed || []),
+          beats: new Set(data.storyState.beats || []),
+          flags: new Set(data.storyState.flags || []),
+          failed: new Set(data.storyState.failed || []),
+        }
+      : state.storyState || { current: "island_intro", completed: new Set(), beats: new Set(), flags: new Set(), failed: new Set() };
+  state.rogueProfile =
+    data.rogueProfile && typeof data.rogueProfile === "object"
+      ? {
+          noise: Number(data.rogueProfile.noise) || 0,
+          careful: Number(data.rogueProfile.careful) || 0,
+          brute: Number(data.rogueProfile.brute) || 0,
+          failures: Number(data.rogueProfile.failures) || 0,
+          outcomes: new Set(data.rogueProfile.outcomes || []),
+        }
+      : state.rogueProfile || { noise: 0, careful: 0, brute: 0, failures: 0, outcomes: new Set() };
+  state.behaviorProfile =
+    data.behaviorProfile && typeof data.behaviorProfile === "object"
+      ? {
+          noise: Number(data.behaviorProfile.noise) || 0,
+          careful: Number(data.behaviorProfile.careful) || 0,
+          aggressive: Number(data.behaviorProfile.aggressive) || 0,
+          patient: Number(data.behaviorProfile.patient) || 0,
+        }
+      : state.behaviorProfile || { noise: 0, careful: 0, aggressive: 0, patient: 0 };
   if (data.chat) {
     state.chat.channel = data.chat.channel || "#kernel";
     state.chat.channels = new Set(data.chat.channels || ["#kernel"]);
@@ -6432,11 +8565,23 @@ function loadState(options) {
       }));
     renderChat();
   }
+  // Ensure new narrative nodes stay visible on older saves.
+  state.discovered.add("island.grid");
+  state.unlocked.add("island.grid");
+  state.discovered.add("trust.anchor");
+  state.unlocked.add("trust.anchor");
+  RegionManager.bootstrap({ silent: true });
+  validateGlitchChant();
+  ensureStoryState();
+  if (!state.rogueProfile || typeof state.rogueProfile !== "object") {
+    state.rogueProfile = { noise: 0, careful: 0, brute: 0, failures: 0, outcomes: new Set() };
+  }
   // scratchpad is user-authored; don't clear on load
   if (!opts.silent) writeLine("State loaded.", "ok");
   ensureDriveBackfill({ silent: true });
   applyCorruptionClasses();
   showLoc();
+  RegionManager.enterRegionByNode(state.loc);
   storyChatTick();
   tutorialAdvance();
   ensureSiphonLoop();
@@ -6487,6 +8632,18 @@ function listJobs() {
       status: hasPatch ? "[READY]" : "[ACTIVE]",
       detail:
         "Breach + connect `relay.uplink`, read `uplink.req`, then `edit patch`, `upload <you>.patch patch.s`, `call scripts.trust.uplink.sync` (+mirror route).",
+    });
+  }
+
+  if (state.discovered.has("deep.slate") && !state.flags.has("q_cinder_done")) {
+    const ready = state.inventory.has("cinder.token");
+    jobs.push({
+      id: "cinder",
+      npc: "archivist",
+      title: "Cinder Recovery",
+      status: ready ? "[READY]" : "[ACTIVE]",
+      detail:
+        "Descend: `connect deep.slate` -> run phase.s -> `breach trench.node` -> forge `cinder.token` with mix.s, then clear `cinder.core`.",
     });
   }
 
@@ -6561,6 +8718,18 @@ function turnIn(what) {
 
 function diagnoseProgress() {
   writeLine("DIAGNOSE", "header");
+  RegionManager.bootstrap({ silent: true });
+  const lockedRegions = REGION_DEFS.filter((def) => !state.region.unlocked.has(def.id));
+  if (lockedRegions.length) {
+    writeLine("Regions:", "header");
+    lockedRegions.forEach((def) => {
+      const gate = RegionManager.canAccessNode(def.nodes[0] || "") || {};
+      writeLine(`${def.name} [LOCKED]`, "warn");
+      if (gate.hint) writeLine("  gate: " + gate.hint, "dim");
+    });
+  } else {
+    writeLine("All regions open.", "dim");
+  }
   const discovered = Array.from(state.discovered).sort();
   const locked = discovered.filter((l) => !state.unlocked.has(l));
   if (!locked.length) {
@@ -6572,6 +8741,7 @@ function diagnoseProgress() {
       const need = [];
       if (req.missingItems.length) need.push("items: " + req.missingItems.join(", "));
       if (req.missingFlags.length) need.push("signals: " + req.missingFlags.join(", "));
+      if (req.missingTrust) need.push("trust lvl: " + req.missingTrust);
       writeLine(`${locName} :: LOCKED`, "warn");
       if (need.length) writeLine("  pre-check missing " + need.join(" | "), "dim");
       if (loc && loc.locks && loc.locks.length) writeLine("  first lock: " + loc.locks[0].prompt, "dim");
@@ -6740,7 +8910,9 @@ function handleCommand(inputText) {
     writeLine(`HANDLE SET: ${state.handle}`, "ok");
     chatPost({ channel: state.chat.channel, from: "sys", body: `*** ${state.handle} connected`, kind: "system" });
     loadScratchFromStorage();
+    RegionManager.bootstrap({ silent: true });
     showLoc();
+    RegionManager.enterRegionByNode(state.loc);
     storyChatTick();
     tutorialPrint();
     updateHud();
@@ -6809,9 +8981,10 @@ function handleCommand(inputText) {
           if (a.startsWith("--from=")) from = a.slice("--from=".length);
         }
 
+        const existingScriptEntry = findUserScript(name);
         const existingScript =
-          state.userScripts && state.userScripts[name] && typeof state.userScripts[name].code === "string"
-            ? String(state.userScripts[name].code)
+          existingScriptEntry && existingScriptEntry.script && typeof existingScriptEntry.script.code === "string"
+            ? String(existingScriptEntry.script.code)
             : null;
 
         const template = example
@@ -6845,6 +9018,9 @@ function handleCommand(inputText) {
       connectLoc(args[0], { autoBreach: flags.has("--breach") });
       storyChatTick();
       tutorialNextHint();
+      break;
+    case "mesh.bridge":
+      meshBridgeCommand();
       break;
     case "disconnect":
     case "dc": {
@@ -6986,6 +9162,9 @@ function handleCommand(inputText) {
     case "diagnose":
       diagnoseProgress();
       break;
+    case "regions":
+      RegionManager.describeRegions();
+      break;
     case "store":
       listStore();
       break;
@@ -7034,6 +9213,15 @@ function handleCommand(inputText) {
     case "siphon":
       siphonCommand(args);
       break;
+    case "ping":
+      pingCommand(args);
+      break;
+    case "stabilize":
+      stabilizeGlitch();
+      break;
+    case "splice":
+      spliceGlitch();
+      break;
     case "wait":
       waitTick();
       break;
@@ -7051,6 +9239,12 @@ function handleCommand(inputText) {
         tutorialAdvance();
       }
       tutorialPrint();
+      break;
+    case "trust":
+      printTrustStatus();
+      break;
+    case "status":
+      printTrustStatus({ concise: true });
       break;
     case "contacts":
       listContacts();
@@ -7371,10 +9565,7 @@ function uniqueSorted(list) {
 function allScriptNames() {
   const trust = Object.keys(trustScripts);
   const kit = Object.keys(state.kit).map((n) => "kit." + n);
-  const user =
-    state.handle && state.handle.length
-      ? Object.keys(state.userScripts).map((n) => state.handle + "." + n)
-      : Object.keys(state.userScripts);
+  const user = Object.keys(state.userScripts);
   return uniqueSorted([...trust, ...kit, ...user, ...Object.keys(state.kit), ...Object.keys(state.userScripts)]);
 }
 
@@ -7394,7 +9585,7 @@ function allDriveRefs() {
 function allUserScriptRefs() {
   const handle = String(state.handle || "").trim();
   if (!handle) return [];
-  return uniqueSorted(Object.keys(state.userScripts || {}).map((n) => `${handle}.${n}`));
+  return uniqueSorted(Object.keys(state.userScripts || {}));
 }
 
 function allUploadSourceRefs() {
@@ -7457,6 +9648,7 @@ function allCommandNames() {
     "exfiltrate",
     "restore",
     "stabilize",
+    "splice",
     "corrupt",
     "restart",
   ];
@@ -7628,3 +9820,205 @@ function boot() {
 }
 
 boot();
+function maskWithGlitchGlyph(text, level, seed = 0) {
+  const raw = String(text || "");
+  if (!raw) return raw;
+  const chars = raw.split("");
+  // Deterministic seed keeps lines stable; future stabilize/repair mechanics can target this mask.
+  let hash = seed % 9973;
+  for (let i = 0; i < chars.length; i++) hash = (hash + chars[i].charCodeAt(0) * (i + 3)) % 9973;
+
+  // Controlled degradation per corruption tier (never full obfuscation).
+  const ratios = { 1: 0.06, 2: 0.12, 3: 0.18 };
+  const ratio = ratios[Math.max(1, Math.min(3, level || 1))] || 0.06;
+  const max = Math.max(1, Math.floor(chars.length * ratio));
+  const step = Math.max(2, Math.floor(chars.length / max));
+  let replaced = 0;
+  for (let i = 0; i < chars.length && replaced < max; i++) {
+    const c = chars[i];
+    if (!/[A-Za-z0-9]/.test(c)) continue;
+    // Preserve key nouns/commands: avoid replacing when adjacent to separators that mark locs/handles.
+    if (/[.@/:_]/.test(chars[i - 1] || "") || /[.@/:_]/.test(chars[i + 1] || "")) continue;
+    if ((i + hash) % step === 0) {
+      chars[i] = GLITCH_GLYPH; // Standard glyph; no underscores or random ASCII noise.
+      replaced += 1;
+      // Higher tiers mask short runs to feel chunkier while leaving structure readable.
+      if (level >= 2 && replaced < max && /[A-Za-z0-9]/.test(chars[i + 1] || "")) {
+        chars[i + 1] = GLITCH_GLYPH;
+        replaced += 1;
+      }
+      if (level >= 3 && replaced < max && /[A-Za-z0-9]/.test(chars[i + 2] || "")) {
+        chars[i + 2] = GLITCH_GLYPH;
+        replaced += 1;
+      }
+    }
+  }
+  return chars.join("");
+}
+
+function glitchBlip() {
+  if (glitchBlipTimer) {
+    window.clearTimeout(glitchBlipTimer);
+    glitchBlipTimer = null;
+  }
+  document.body.classList.add("glitch-blip");
+  glitchBlipTimer = window.setTimeout(() => {
+    document.body.classList.remove("glitch-blip");
+    glitchBlipTimer = null;
+  }, 220);
+}
+
+function applyEscalationTextEffects(text) {
+  // Single entry point for corruption. Only use GLITCH_GLYPH, keep lines readable,
+  // and only when regions/content expect it. This avoids global noise and keeps
+  // glyph use thematic.
+  const raw = String(text || "");
+  if (!corruptionAllowed(raw)) return raw;
+  if (raw.includes(GLITCH_GLYPH) || /rogue/i.test(raw)) glitchBlip();
+
+  const trace = state.trace || 0;
+  const corruption = corruptionLevel();
+  const region = state.region && state.region.current;
+  const severeRegion = region === "secureCore" || region === "cinderDepth";
+
+  // Corruption level governs intensity; trace nudges pacing without erasing structure.
+  const level = Math.max(1, corruption);
+  const seed = trace + (severeRegion ? 7 : 0);
+  // Masking is centralized so future repair/stabilize mechanics can target this layer.
+  return maskWithGlitchGlyph(raw, level, seed);
+}
+
+function corruptionAllowed(text) {
+  // Whitelist: never corrupt core clarity output.
+  const cleanSnippets = [
+    "Usage:",
+    "Command error",
+    "already",
+    "not found",
+    "missing",
+    "trust state",
+    "help",
+    "LOCATIONS",
+    "TRUST STATE",
+  ];
+  const lower = String(text || "").toLowerCase();
+  if (cleanSnippets.some((s) => lower.includes(s.toLowerCase()))) return false;
+
+  const loc = state.loc || "";
+  const region = state.currentRegion || (state.region && state.region.current) || "";
+  const corruption = corruptionLevel();
+
+  // Glitch zones: only hosts flagged for corruption, or regions explicitly marked severe.
+  const glitchLocs = new Set(["rogue.core", "core.relic", "glitch.cache", "slipper.hole", "deep.slate", "trench.node", "cinder.core"]);
+  const glitchRegions = new Set(["secureCore", "cinderDepth"]);
+  const inGlitchZone = glitchLocs.has(loc) || glitchRegions.has(region);
+
+  // Content triggers: partial fragments or rogue core responses may carry glyphs.
+  const hasGlyph = String(text || "").includes(GLITCH_GLYPH);
+  const fragmentContext = /fragment\.(alpha|beta|gamma|delta)/i.test(text || "") || hasGlyph;
+  const rogueResponding = /rogue/i.test(text || "") && (loc === "rogue.core" || glitchRegions.has(region));
+
+  // Glitch allowed only when justified: corruption is active OR region is glitched (future repair can hook here).
+  if (corruption <= 0 && !inGlitchZone) return false;
+  if (inGlitchZone) return true;
+  if (corruption >= 1 && fragmentContext) return true;
+  if (corruption >= 1 && rogueResponding) return true;
+  return false; // Ambient/system text stays clean.
+}
+
+function glitchChoiceTaken() {
+  return state.flags.has("glitch_stabilizer") || state.flags.has("glitch_exploiter");
+}
+
+function maybeLockTrustProfile(trigger) {
+  if (state.flags.has("trust_profile_locked")) return;
+  const region = state.currentRegion || (state.region && state.region.current);
+  if (!region || region === "introNet") return; // Intro stays consequence-free.
+  const bp = state.behaviorProfile || {};
+  const total = (bp.noise || 0) + (bp.careful || 0) + (bp.aggressive || 0) + (bp.patient || 0);
+  if (total < 5) return; // Wait for a few signals to establish cadence.
+  const dom = dominantBehavior();
+  if (!dom) return;
+  const noisyMoment = trigger && /heat|trace|glitch splice/i.test(trigger);
+  const patientMoment = trigger && /wait|anchor|cool|stabilize/i.test(trigger);
+  if (!noisyMoment && !patientMoment) return;
+  state.flags.add("trust_profile_locked");
+  state.trustProfile = dom;
+  state.flags.add(`trust_profile_${dom}`);
+  // One optional whisper: the net keeps memory; no UI, no prompt.
+  if (!state.flags.has("trust_profile_hint")) {
+    state.flags.add("trust_profile_hint");
+    chatPost({ channel: "#kernel", from: "watcher", body: "the net remembers this." });
+  }
+}
+
+// Look for user reconstruction attempts of the glitch chant via scratchpad or drive text.
+function findChantAttempt() {
+  const attempts = [];
+  try {
+    if (scratchPad && scratchPad.value) {
+      scratchPad.value
+        .split("\n")
+        .map((l) => l.trim().toUpperCase())
+        .filter((l) => l.includes("THREAD"))
+        .forEach((l) => attempts.push(l));
+    }
+  } catch {}
+
+  Object.keys(state.drive || {}).forEach((id) => {
+    const entry = state.drive[id];
+    if (!entry || typeof entry.content !== "string") return;
+    const lines = String(entry.content || "")
+      .split("\n")
+      .map((l) => l.trim().toUpperCase())
+      .filter((l) => l.includes("THREAD"));
+    attempts.push(...lines);
+  });
+
+  // Return the first candidate; existence alone triggers near-miss behavior to keep mystery intact.
+  return attempts.find((a) => a) || null;
+}
+
+// Adaptive intro for rogue.core: tone depends on prior play (noise vs careful vs brute).
+function rogueCoreAdaptiveIntro() {
+  if (state.flags.has("rogue_intro_done")) return;
+  state.flags.add("rogue_intro_done");
+  const rp = state.rogueProfile || { noise: 0, careful: 0, brute: 0 };
+  const noisy = rp.noise > rp.careful;
+  const brute = rp.brute > rp.careful;
+  const locked = state.flags.has("trust_profile_locked") ? state.trustProfile : null;
+  chatPost({
+    channel: "#kernel",
+    from: "archivist",
+    body: noisy
+      ? "Rogue sniffed your noise. It adapts to repetition. Move with intent."
+      : "Rogue listens. Trust steady, chant whole, checksum ready. Do not rush.",
+  });
+  if (brute) chatPost({ channel: "#kernel", from: "rogue", body: "...pattern detected. adjusting..." });
+  if (locked && !state.flags.has("rogue_trust_hint")) {
+    state.flags.add("rogue_trust_hint");
+    chatPost({
+      channel: "#kernel",
+      from: "rogue",
+      body: locked === "noise" || locked === "aggressive" ? "you always push. windows shrink." : "you learned to wait. doors linger.",
+    });
+  }
+}
+
+// Profiling: rogue core leans into the player's observed cadence without new meters.
+function rogueCoreProfiledPressure() {
+  const rp = state.rogueProfile || { noise: 0, careful: 0, brute: 0 };
+  const locked = state.flags.has("trust_profile_locked") ? state.trustProfile : null;
+  const noiseTilt = (rp.noise || 0) + (rp.brute || 0);
+  const calmTilt = rp.careful || 0;
+  // Adaptation signals use existing profiles: noisy gets tighter trace, patient gets slight relief; exploit vs stabilize colors corruption.
+  if (noiseTilt > calmTilt + 1 && state.trace < state.traceMax) {
+    state.trace = Math.min(state.traceMax, (state.trace || 0) + 1);
+    chatPost({ channel: "#kernel", from: "rogue", body: "trace warmed; your echo is predictable." });
+  } else if (calmTilt >= noiseTilt && state.trace > 0) {
+    state.trace = Math.max(0, (state.trace || 0) - 1);
+    chatPost({ channel: "#kernel", from: "rogue", body: "waiting alters the pattern. pressure eases... slightly." });
+  }
+  if (locked === "noise" || locked === "aggressive") setCorruptionLevel(Math.min(3, corruptionLevel() + 0)); // subtle: keep heat-driven vibe.
+  if (locked === "patient" || locked === "careful") setCorruptionLevel(Math.min(3, corruptionLevel() + (state.flags.has("glitch_exploiter") ? 1 : 0)));
+}
