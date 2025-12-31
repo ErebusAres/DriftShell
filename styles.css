@@ -194,6 +194,7 @@ body.corrupt3 #shell::after {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
+  transition: color 0.45s ease, text-shadow 0.45s ease;
 }
 
 #layout {
@@ -325,6 +326,49 @@ section {
 #prompt {
   color: var(--cyan);
   text-shadow: 0 0 10px rgba(143, 233, 255, 0.25);
+}
+
+#hud,
+#status-line,
+#trace,
+#gc {
+  transition: color 0.45s ease, text-shadow 0.45s ease, filter 0.45s ease;
+}
+
+.trace-warm #trace,
+.trace-warm .stat:nth-child(2) span {
+  color: var(--yellow);
+  text-shadow: 0 0 8px rgba(255, 210, 106, 0.25);
+}
+
+.trace-hot #trace,
+.trace-hot .stat:nth-child(2) span {
+  color: var(--orange);
+  text-shadow: 0 0 10px rgba(255, 179, 71, 0.3);
+}
+
+.trace-critical #trace,
+.trace-critical .stat:nth-child(2) span {
+  color: var(--red);
+  text-shadow: 0 0 12px rgba(255, 110, 110, 0.32);
+}
+
+.trust-low #hud {
+  filter: saturate(1.05) hue-rotate(6deg);
+}
+
+.trust-low #status-line {
+  color: #f1c58c;
+}
+
+.trust-high #hud {
+  filter: saturate(0.98) hue-rotate(-4deg);
+}
+
+.glitch-blip #screen,
+.glitch-blip #shell {
+  filter: contrast(1.1) saturate(0.9);
+  transition: filter 0.2s ease;
 }
 
 #cmd {
