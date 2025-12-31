@@ -342,7 +342,11 @@ function trustStatusLabel() {
 
 function trustAdjustHeat(delta, reason) {
   if (!state.trust || typeof state.trust !== "object") state.trust = { level: 2, heat: 0, lastScanAt: 0 };
-  const next = Math.max(0, trustHeat() + delta);
+  const zone = currentZone();
+  const heatScale =
+    zone === "isolated" ? 0.7 : zone === "pressure" ? 1.2 : zone === "core" ? 1.3 : zone === "unstable" ? 1.1 : 1;
+  const scaledDelta = delta > 0 ? Math.max(0, Math.round(delta * heatScale)) : delta;
+  const next = Math.max(0, trustHeat() + scaledDelta);
   state.trust.heat = next;
   maybeTeachSecurityMoment(delta);
   if (delta > 0) noteIntroHeatSpike();
@@ -391,7 +395,9 @@ function trustAdjustHeat(delta, reason) {
 function trustCoolDown(amount, reason) {
   if (!state.trust || typeof state.trust !== "object") state.trust = { level: 2, heat: 0, lastScanAt: 0 };
   const priorHeat = trustHeat();
-  const next = Math.max(0, trustHeat() - amount);
+  const zone = currentZone();
+  const coolScale = zone === "isolated" ? 1.2 : zone === "pressure" ? 0.9 : zone === "core" ? 0.8 : 1;
+  const next = Math.max(0, trustHeat() - Math.max(0, Math.round(amount * coolScale)));
   state.trust.heat = next;
   if (reason && reason !== "wait") chatSystem(`trust cool (${reason}) -> heat ${next}/${TRUST_HEAT_THRESHOLD}`);
   if (reason === "wait" || reason === "anchor read") {
@@ -526,6 +532,31 @@ function applyCorruptionClasses() {
     screen.classList.toggle("screen-corrupt1", level >= 1);
     screen.classList.toggle("screen-corrupt2", level >= 2);
   }
+}
+
+function currentZone() {
+  // Zones are implicit; map regions to zones to shape tone and pressure.
+  const regionId = state.currentRegion || (state.region && state.region.current);
+  if (regionId === "introNet") return "isolated";
+  if (regionId === "publicNet") return "local";
+  if (regionId === "corporateNet") return "pressure";
+  if (regionId === "secureCore") return "core";
+  if (regionId === "cinderDepth") return "unstable";
+  return state.zone || "isolated";
+}
+
+function setZone(zoneId) {
+  const z = zoneId || currentZone();
+  state.zone = z;
+}
+
+function zoneForRegion(regionId) {
+  if (regionId === "introNet") return "isolated";
+  if (regionId === "publicNet") return "local";
+  if (regionId === "corporateNet") return "pressure";
+  if (regionId === "secureCore") return "core";
+  if (regionId === "cinderDepth") return "unstable";
+  return state.zone || "isolated";
 }
 
 function setCorruptionLevel(level) {
@@ -2968,6 +2999,7 @@ const state = {
   currentRegion: null,
   narrativeHint: null,
   glitchChant: null,
+  zone: "isolated",
   trustProfile: null,
   introMemory: { pingCount: 0, pingStreak: 0, lastPingAt: 0, heatSpikes: 0, traceNotice: false, patienceNotice: false },
   storyState: {
@@ -3177,6 +3209,7 @@ function onRegionEnter(region) {
   // Example extension:
   // if (region.id === "corporateNet") chatPost({ channel: "#kernel", from: "sys", body: "Audit eyes open." });
   // Keep side effects minimal to avoid altering base mechanics.
+  if (region && region.id) setZone(zoneForRegion(region.id));
   if (state.flags.has("intro_heat_memory") && region && region.id && region.id !== "introNet") {
     const key = `intro_heat_echo_${region.id}`;
     if (!state.flags.has(key)) {
@@ -3974,6 +4007,214 @@ const LOCS = {
     links: ["lattice.cache", "trench.node"],
     files: {
       "slate.log": {
+        type: "text",
+        content: [
+          "DEEP SLATE",
+          "The archive warned you about depth. This slate is the descent.",
+          "",
+          "Need:",
+          "- Trust level 2+ (cool heat first)",
+          "- Lattice sigil (still applies down here)",
+          "- Patience: read everything, compute everything",
+          "",
+          "Run phase.s to pull a trench key. Expect checksum locks ahead.",
+        ].join("\n"),
+      },
+      "slate.b64": { type: "text", cipher: true, content: "TUFORE0MRQ==" },
+      "phase.s": {
+        type: "script",
+        script: {
+          name: "phase",
+          sec: "MIDSEC",
+          code: [
+            "// @sec MIDSEC",
+            "if (ctx.hasItem('trench.key')) { ctx.print('Trench key already generated.'); return; }",
+            "const payload = ctx.read('trench.dat') || '';",
+            "const handle = ctx.handle();",
+            "if (!payload) { ctx.print('No payload (need trench.dat).'); return; }",
+            "const text = payload.trim() + '|HANDLE=' + handle;",
+            "const sum = ctx.util.checksum(text);",
+            "ctx.addItem('trench.key');",
+            "ctx.flag('deep_signal');",
+            "ctx.print('Trench key minted.');",
+            "ctx.print('phase checksum: ' + ctx.util.hex3(sum));",
+          ].join("\n"),
+        },
+        content: [
+          "/* phase.s */",
+          "function main(ctx,args){",
+          "  // Mint a trench.key and preview the checksum path forward.",
+          "}",
+        ].join("\n"),
+      },
+      "trench.dat": {
+        type: "text",
+        content: [
+          "TRENCH.DAT",
+          "payload=" + CINDER_PAYLOAD,
+          "text = payload + '|HANDLE=<your_handle>'",
+          "expected = hex3(checksum(text))",
+        ].join("\n"),
+      },
+    },
+  },
+  "trench.node": {
+    title: "TRENCH.NODE",
+    desc: [
+      "A cooled trench lined with audit mirrors.",
+      "The locks here demand sigils, phrases, and clean math.",
+    ],
+    requirements: { items: ["trench.key"], trust: 2 },
+    locks: [
+      {
+        prompt: "LOCK: weave phrase required",
+        answer: "THREAD THE DRIFT",
+        hint: "Run sniffer.s; keep the phrase handy.",
+      },
+      {
+        prompt: "LOCK: checksum payload (hex3)",
+        answer: () => expectedForChecksumPayload(CINDER_PAYLOAD),
+        hint: "Use trench.dat or run phase.s for the checksum math.",
+      },
+    ],
+    links: ["deep.slate", "cinder.core"],
+    files: {
+      "trench.log": {
+        type: "text",
+        content: [
+          "TRENCH LOG",
+          "The slate opens the trench. The trench opens the core.",
+          "",
+          "Locks:",
+          "- Weave phrase (from sniffer.s)",
+          "- Checksum from trench.dat (hex3)",
+          "",
+          "Reward: a cinder mote, needed for the depth token.",
+        ].join("\n"),
+      },
+      "mantle.rot13": { type: "text", cipher: true, content: "ZNAGYR" },
+      "cinder.mote": {
+        type: "item",
+        item: "cinder.mote",
+        content: ["CINDER.MOTE", "A fragment of cooled ember light."].join("\n"),
+      },
+      "mix.s": {
+        type: "script",
+        script: {
+          name: "mix",
+          sec: "HIGHSEC",
+          code: [
+            "// @sec HIGHSEC",
+            "const need = ['cinder.mote','relic.key','relay.shard'].filter((x) => !ctx.hasItem(x));",
+            "if (need.length) { ctx.print('Missing: ' + need.join(', ')); return; }",
+            "if (ctx.hasItem('cinder.token')) { ctx.print('Cinder token already forged.'); return; }",
+            "ctx.addItem('cinder.token');",
+            "ctx.print('Forged: cinder.token');",
+          ].join("\n"),
+        },
+        content: [
+          "/* mix.s */",
+          "function main(ctx,args){",
+          "  // Combine trench rewards + relic gear into a depth token.",
+          "}",
+        ].join("\n"),
+      },
+    },
+  },
+  "cinder.core": {
+    title: "CINDER.CORE",
+    desc: [
+      "A cooled remnant of the rogue process, nested below the relic.",
+      "This core accepts chants, sigils, and proof you kept trust steady.",
+    ],
+    requirements: { items: ["cinder.token"], flags: ["glitch_phrase_ready"], trust: 3 },
+    locks: [
+      {
+        prompt: "CINDER: checksum(payload|HANDLE=<you>) (hex3)",
+        answer: () => expectedForChecksumPayload(CINDER_PAYLOAD),
+        hint: "Compute from trench.dat or phase.s output.",
+      },
+      {
+        prompt: "CINDER: repaired chant",
+        answer: "MIRROR THE EMBER STILL THREAD",
+        hint: "Run stitch.s after fixing fragments.",
+      },
+      {
+        prompt: "CINDER: mantle word",
+        answer: "MANTLE",
+        hint: "Decode mantle.rot13 or slate.b64.",
+      },
+    ],
+    links: ["trench.node", "core.relic"],
+    files: {
+      "cinder.log": {
+        type: "text",
+        content: [
+          "CINDER CORE",
+          "The trench minted a mote; the relic gave you leverage. Put them together.",
+          "",
+          "This is optional endgame. Rewards are bragging rights + heat control.",
+        ].join("\n"),
+      },
+      "upg.coolant": {
+        type: "upgrade",
+        item: "upg.coolant",
+        content: [
+          "UPGRADE: COOLANT+",
+          "A tuned coolant line. Install to reduce trace by 2 and cool heat a bit.",
+        ].join("\n"),
+      },
+    },
+  },
+  "corp.audit": {
+    title: "CORP.AUDIT",
+    desc: ["An audit chamber lit by cold LEDs.", "Anything unmasked gets burned."],
+    requirements: { flags: ["ghosted"] },
+    locks: [
+      {
+        prompt: "LOCK: supply the shard sequence (3-1-4)",
+        answer: "3-1-4",
+        hint: "Run ghost.s; it prints the sequence.",
+      },
+    ],
+    links: ["weaver.den"],
+    files: {
+      "audit.log": {
+        type: "text",
+        content: ["CORP AUDIT SUMMARY", "Sequence: 3-1-4"].join("\n"),
+      },
+      "relay.shard": {
+        type: "item",
+        item: "relay.shard",
+        content: ["RELAY.SHARD", "Segment: LK-ACCT/relay", "Status: cold"].join("\n"),
+      },
+    },
+  },
+  "lattice.cache": {
+    title: "LATTICE.CACHE",
+    desc: [
+      "A vault of interlocked lattice.",
+      "The air tastes like static and old promises.",
+    ],
+    requirements: { items: ["token.key", "weaver.mark"], flags: ["lattice_sigil"] },
+    locks: [
+      {
+        prompt: "LOCK: confirm lattice sigil",
+        answer: "SIGIL: LATTICE",
+        hint: "Decode key.b64 in the archive.",
+      },
+    ],
+    links: ["archives.arc", "core.relic", "glitch.cache", "deep.slate"],
+    files: {
+      "cache.log": {
+        type: "text",
+        content: [
+          "LATTICE CACHE",
+          "The lattice accepts the token and the weaver mark.",
+          "The relic key rests inside.",
+        ].join("\n"),
+      },
+      "warden.dat": {
         type: "text",
         content: [
           "DEEP SLATE",
@@ -6675,7 +6916,10 @@ function profiledTraceRise(base, reason) {
   const bias = behaviorBias();
   const heat = trustHeat();
   const currentTrace = state.trace || 0;
-  let delta = Math.max(0, base);
+  const zone = currentZone();
+  const traceScale =
+    zone === "isolated" ? 0.6 : zone === "pressure" ? 1.25 : zone === "core" ? 1.4 : zone === "unstable" ? 1.15 : 1;
+  let delta = Math.max(0, Math.round(base * traceScale));
   if (bias.momentum > 1 || bias.dom === "aggressive") {
     if (heat >= Math.floor(TRUST_HEAT_THRESHOLD / 2) || currentTrace >= state.traceMax - 1) {
       delta += 1; // Noisy players trigger earlier watcher pressure.
@@ -7417,6 +7661,7 @@ function updateHud() {
 function storyChatTick() {
   if (!state.handle) return;
   RegionManager.bootstrap({ silent: true });
+  setZone(zoneForRegion(state.currentRegion || (state.region && state.region.current) || "isolated"));
   triggerNarrativeStepForLoc(state.loc);
   behaviorToneNudge();
   if (state.loc === "home.hub" && !state.flags.has("chat_intro")) {
@@ -8153,6 +8398,7 @@ function getSaveData() {
     localSync: state.localSync,
     trust: state.trust,
     trustProfile: state.trustProfile,
+    zone: state.zone,
     region: {
       current: state.region && state.region.current ? state.region.current : null,
       unlocked: Array.from((state.region && state.region.unlocked) || []),
@@ -8254,6 +8500,7 @@ function loadState(options) {
       ? { lastAt: Number(data.wait.lastAt) || 0, streak: Number(data.wait.streak) || 0 }
       : state.wait || { lastAt: 0, streak: 0 };
   state.trustProfile = data.trustProfile || null;
+  state.zone = data.zone || state.zone || "isolated";
   state.introMemory =
     data.introMemory && typeof data.introMemory === "object"
       ? {
