@@ -532,6 +532,15 @@ function isZoneToken(token) {
   return ZONE_NAMES.includes(normalizeZone(String(token || "").trim()));
 }
 
+function isCanonicalScriptName(name) {
+  // Idempotence guard: canonicalization must be skip-able to avoid prefix growth
+  // when syncing a folder that also receives mirrored output (local/local/...).
+  const handle = state.handle || "";
+  const key = String(name || "").trim();
+  const parts = key.replace(/^drive:local\//i, "").replace(/\.s$/i, "").split(".");
+  return parts.length >= 3 && parts[0] === handle && isZoneToken(parts[1]);
+}
+
 function scriptBaseFromKey(key) {
   const handle = state.handle ? String(state.handle) : "";
   let name = String(key || "").trim().replace(/\.s$/i, "");
@@ -573,7 +582,13 @@ function findUserScript(rawName) {
 function upsertUserScript(rawName, sec, code, zoneHint) {
   if (!state.userScripts || typeof state.userScripts !== "object") state.userScripts = {};
   const found = findUserScript(rawName);
-  const target = found ? found.key : canonicalScriptName(rawName, zoneHint).canonical;
+  // Canonicalize exactly once; skip if already canonical to avoid recursive prefixes.
+  const target =
+    found && isCanonicalScriptName(found.key)
+      ? found.key
+      : found
+        ? canonicalScriptName(found.key, zoneHint).canonical
+        : canonicalScriptName(rawName, zoneHint).canonical;
   state.userScripts[target] = { owner: state.handle, name: target, sec, code };
   return target;
 }
@@ -1436,6 +1451,8 @@ async function syncLocalFolder() {
         if (changed) scratchUpdated = true;
         continue;
       }
+      // Skip files already in canonical form to avoid re-importing mirrored output.
+      if (isCanonicalScriptName(name)) continue;
       const file = await entry.getFile();
       updateLocalFileMeta(name, file);
       const mirror = parseMirrorDownloadName(name);
@@ -1572,9 +1589,12 @@ async function mirrorDownloadToLocalFolder(locName, fileName, entry) {
 }
 
 async function mirrorUserScriptToLocalFolder(scriptName, code) {
+  // Defensive: do not mirror scripts back into the watched folder if the name is already canonical;
+  // this prevents local sync from re-reading its own output and growing prefixes recursively.
   if (!shouldMirrorLocal()) return;
   if (!supportsLocalFolder() || !window.isSecureContext) return;
   if (!localFolderHandle) return;
+  if (isCanonicalScriptName(scriptName)) return;
   const perm = await ensureLocalFolderPermission(true);
   if (!perm.ok) {
     writeLine("Local sync blocked: permission denied.", "warn");
@@ -4293,221 +4313,6 @@ const LOCS = {
         hint: "Run ghost.s; it prints the sequence.",
       },
     ],
-    requirements: {},
-    locks: [],
-    links: ["home.hub", "public.exchange"],
-    files: {
-      "anchor.log": {
-        type: "text",
-        content: [
-          "TRUST ANCHOR",
-          "Rapid scans and failed locks raise heat. Too much heat drops trust levels and triggers lockouts.",
-          "",
-          "Cool paths:",
-          "- wait          (slow cool: trace + trust)",
-          "- visit here    (reading this cools heat)",
-          "- install coolant upgrades for trace",
-          "",
-          "Trust gates some locs. Keep it steady if you want deeper routes.",
-        ].join("\n"),
-      },
-      "anchor.brief": {
-        type: "text",
-        content: [
-          "NARRATIVE STEP :: trust_pressure",
-          "A reminder: every security layer is a story about paranoia.",
-          "Balance heat with patience; anchor before you breach again.",
-        ].join("\n"),
-      },
-    },
-  },
-  "deep.slate": {
-    title: "DEEP.SLATE",
-    desc: [
-      "A slate of old relays stacked under the archive.",
-      "Signals smear here; patience and trust keep them readable.",
-    ],
-    requirements: { flags: ["trace_open", "lattice_sigil"], trust: 2 },
-    locks: [
-      {
-        prompt: "LOCK: recite the lattice sigil",
-        answer: "SIGIL: LATTICE",
-        hint: "Decode key.b64 in the archive.",
-      },
-    ],
-    links: ["lattice.cache", "trench.node"],
-    files: {
-      "slate.log": {
-        type: "text",
-        content: [
-          "DEEP SLATE",
-          "The archive warned you about depth. This slate is the descent.",
-          "",
-          "Need:",
-          "- Trust level 2+ (cool heat first)",
-          "- Lattice sigil (still applies down here)",
-          "- Patience: read everything, compute everything",
-          "",
-          "Run phase.s to pull a trench key. Expect checksum locks ahead.",
-        ].join("\n"),
-      },
-      "slate.b64": { type: "text", cipher: true, content: "TUFORE0MRQ==" },
-      "phase.s": {
-        type: "script",
-        script: {
-          name: "phase",
-          sec: "MIDSEC",
-          code: [
-            "// @sec MIDSEC",
-            "if (ctx.hasItem('trench.key')) { ctx.print('Trench key already generated.'); return; }",
-            "const payload = ctx.read('trench.dat') || '';",
-            "const handle = ctx.handle();",
-            "if (!payload) { ctx.print('No payload (need trench.dat).'); return; }",
-            "const text = payload.trim() + '|HANDLE=' + handle;",
-            "const sum = ctx.util.checksum(text);",
-            "ctx.addItem('trench.key');",
-            "ctx.flag('deep_signal');",
-            "ctx.print('Trench key minted.');",
-            "ctx.print('phase checksum: ' + ctx.util.hex3(sum));",
-          ].join("\n"),
-        },
-        content: [
-          "/* phase.s */",
-          "function main(ctx,args){",
-          "  // Mint a trench.key and preview the checksum path forward.",
-          "}",
-        ].join("\n"),
-      },
-      "trench.dat": {
-        type: "text",
-        content: [
-          "TRENCH.DAT",
-          "payload=" + CINDER_PAYLOAD,
-          "text = payload + '|HANDLE=<your_handle>'",
-          "expected = hex3(checksum(text))",
-        ].join("\n"),
-      },
-    },
-  },
-  "trench.node": {
-    title: "TRENCH.NODE",
-    desc: [
-      "A cooled trench lined with audit mirrors.",
-      "The locks here demand sigils, phrases, and clean math.",
-    ],
-    requirements: { items: ["trench.key"], trust: 2 },
-    locks: [
-      {
-        prompt: "LOCK: weave phrase required",
-        answer: "THREAD THE DRIFT",
-        hint: "Run sniffer.s; keep the phrase handy.",
-      },
-      {
-        prompt: "LOCK: checksum payload (hex3)",
-        answer: () => expectedForChecksumPayload(CINDER_PAYLOAD),
-        hint: "Use trench.dat or run phase.s for the checksum math.",
-      },
-    ],
-    links: ["deep.slate", "cinder.core"],
-    files: {
-      "trench.log": {
-        type: "text",
-        content: [
-          "TRENCH LOG",
-          "The slate opens the trench. The trench opens the core.",
-          "",
-          "Locks:",
-          "- Weave phrase (from sniffer.s)",
-          "- Checksum from trench.dat (hex3)",
-          "",
-          "Reward: a cinder mote, needed for the depth token.",
-        ].join("\n"),
-      },
-      "mantle.rot13": { type: "text", cipher: true, content: "ZNAGYR" },
-      "cinder.mote": {
-        type: "item",
-        item: "cinder.mote",
-        content: ["CINDER.MOTE", "A fragment of cooled ember light."].join("\n"),
-      },
-      "mix.s": {
-        type: "script",
-        script: {
-          name: "mix",
-          sec: "HIGHSEC",
-          code: [
-            "// @sec HIGHSEC",
-            "const need = ['cinder.mote','relic.key','relay.shard'].filter((x) => !ctx.hasItem(x));",
-            "if (need.length) { ctx.print('Missing: ' + need.join(', ')); return; }",
-            "if (ctx.hasItem('cinder.token')) { ctx.print('Cinder token already forged.'); return; }",
-            "ctx.addItem('cinder.token');",
-            "ctx.print('Forged: cinder.token');",
-          ].join("\n"),
-        },
-        content: [
-          "/* mix.s */",
-          "function main(ctx,args){",
-          "  // Combine trench rewards + relic gear into a depth token.",
-          "}",
-        ].join("\n"),
-      },
-    },
-  },
-  "cinder.core": {
-    title: "CINDER.CORE",
-    desc: [
-      "A cooled remnant of the rogue process, nested below the relic.",
-      "This core accepts chants, sigils, and proof you kept trust steady.",
-    ],
-    requirements: { items: ["cinder.token"], flags: ["glitch_phrase_ready"], trust: 3 },
-    locks: [
-      {
-        prompt: "CINDER: checksum(payload|HANDLE=<you>) (hex3)",
-        answer: () => expectedForChecksumPayload(CINDER_PAYLOAD),
-        hint: "Compute from trench.dat or phase.s output.",
-      },
-      {
-        prompt: "CINDER: repaired chant",
-        answer: "MIRROR THE EMBER STILL THREAD",
-        hint: "Run stitch.s after fixing fragments.",
-      },
-      {
-        prompt: "CINDER: mantle word",
-        answer: "MANTLE",
-        hint: "Decode mantle.rot13 or slate.b64.",
-      },
-    ],
-    links: ["trench.node", "core.relic"],
-    files: {
-      "cinder.log": {
-        type: "text",
-        content: [
-          "CINDER CORE",
-          "The trench minted a mote; the relic gave you leverage. Put them together.",
-          "",
-          "This is optional endgame. Rewards are bragging rights + heat control.",
-        ].join("\n"),
-      },
-      "upg.coolant": {
-        type: "upgrade",
-        item: "upg.coolant",
-        content: [
-          "UPGRADE: COOLANT+",
-          "A tuned coolant line. Install to reduce trace by 2 and cool heat a bit.",
-        ].join("\n"),
-      },
-    },
-  },
-  "corp.audit": {
-    title: "CORP.AUDIT",
-    desc: ["An audit chamber lit by cold LEDs.", "Anything unmasked gets burned."],
-    requirements: { flags: ["ghosted"] },
-    locks: [
-      {
-        prompt: "LOCK: supply the shard sequence (3-1-4)",
-        answer: "3-1-4",
-        hint: "Run ghost.s; it prints the sequence.",
-      },
-    ],
     links: ["weaver.den"],
     files: {
       "audit.log": {
@@ -6197,114 +6002,6 @@ function waitTick() {
     return;
   }
   if (state.flags.has("glitch_stabilizer")) {
-    writeLine("Thread already steadied.", "dim");
-    return;
-  }
-  state.flags.add("glitch_stabilizer");
-  state.flags.add("glitch_path_memory");
-  setCorruptionLevel(Math.max(0, corruptionLevel() - 1));
-  trustCoolDown(1, "glitch stabilize");
-  chatPost({ channel: "#kernel", from: "watcher", body: "you steady the crack. some lines stay readable now." });
-  // Future repair hook: stabilized fragments could be rebuilt later without re-parsing lore.
-  markDirty();
-}
-
-function spliceGlitch() {
-  if (!state.flags.has("glitch_fragment_seen")) {
-    writeLine("Nothing to splice.", "dim");
-    return;
-  }
-  if (state.flags.has("glitch_stabilizer")) {
-    writeLine("You already anchored the thread.", "warn");
-    return;
-  }
-  if (state.flags.has("glitch_exploiter")) {
-    writeLine("The fragment is already bleeding power.", "dim");
-    return;
-  }
-  state.flags.add("glitch_exploiter");
-  state.flags.add("glitch_path_memory");
-  state.gc = Math.max(0, (Number(state.gc) || 0) + 25);
-  trustAdjustHeat(2, "glitch splice");
-  profiledTraceRise(1, "glitch splice");
-  setCorruptionLevel(Math.min(3, corruptionLevel() + 1));
-  chatPost({ channel: "#kernel", from: "rogue", body: "you pull the crack wider. residue banks, eyes notice." });
-  // Future exploit hook: amplified corruption could be weaponized later.
-  maybeLockTrustProfile("glitch");
-  markDirty();
-}
-
-function pingCommand(args) {
-  const region = state.currentRegion || (state.region && state.region.current);
-  if (region !== "introNet") {
-    writeLine("Ping drifts out; nothing notable answers.", "dim");
-    return;
-  }
-  islandPing(args);
-}
-
-function islandPing(args) {
-  const loc = state.loc || "";
-  // Safe failure: a tempting island-only button that raises heat, teaching risk without lasting punishment.
-  if (loc !== "island.grid" && loc !== "island.echo" && loc !== "home.hub") {
-    writeLine("The island beacon only hears pings nearby.", "dim");
-    return;
-  }
-  const mem = introMemoryState();
-  const now = Date.now();
-  const fast = now - (Number(mem.lastPingAt) || 0) < 2500;
-  mem.lastPingAt = now;
-  mem.pingCount = (Number(mem.pingCount) || 0) + 1;
-  mem.pingStreak = fast ? (Number(mem.pingStreak) || 0) + 1 : 1;
-
-  if (mem.pingCount === 1) writeLine("Beacon answers with a soft tone. Feels harmless.", "dim");
-  else if (fast) writeLine("Beacon heats up; echoes sharpen.", "warn");
-  else writeLine("Beacon hums warmer than before.", "warn");
-
-  // Designed stumble: spamming the beacon is tempting, but it raises heat safely to teach consequences.
-  trustAdjustHeat(1, "island ping");
-
-  if (mem.pingStreak >= 2) {
-    const gained = state.trace < state.traceMax ? 1 : 0;
-    if (gained > 0) {
-      state.trace += gained;
-      introTraceTeach("island ping");
-      watcherTraceReact("island ping");
-      writeLine(`TRACE +${gained} (${state.trace}/${state.traceMax})`, "warn");
-    }
-  }
-  if (mem.pingCount >= 2 && trustHeat() > 0) state.flags.add("intro_heat_memory"); // Trust as memory: later tone reacts.
-  markDirty();
-}
-
-function stabilizeGlitch() {
-  if (!state.flags.has("glitch_fragment_seen")) {
-    writeLine("No unstable fragment nearby.", "dim");
-    return;
-  }
-  if (state.flags.has("glitch_exploiter")) {
-    writeLine("Signal remembers you pulled it apart.", "warn");
-    return;
-  }
-  if (state.flags.has("glitch_stabilizer")) {
-    writeLine("Thread already steadied.", "dim");
-    return;
-  }
-  state.flags.add("glitch_stabilizer");
-  state.flags.add("glitch_path_memory");
-  setCorruptionLevel(Math.max(0, corruptionLevel() - 1));
-  trustCoolDown(1, "glitch stabilize");
-  chatPost({ channel: "#kernel", from: "watcher", body: "you steady the crack. some lines stay readable now." });
-  // Future repair hook: stabilized fragments could be rebuilt later without re-parsing lore.
-  markDirty();
-}
-
-function spliceGlitch() {
-  if (!state.flags.has("glitch_fragment_seen")) {
-    writeLine("Nothing to splice.", "dim");
-    return;
-  }
-  if (state.flags.has("glitch_stabilizer")) {
     writeLine("You already anchored the thread.", "warn");
     return;
   }
@@ -6424,188 +6121,9 @@ function stabilizeGlitch() {
   markDirty();
 }
 
-function waitTick() {
-  const now = Date.now();
-  if (!state.wait || typeof state.wait !== "object") state.wait = { lastAt: 0, streak: 0 };
-
-  const since = now - (Number(state.wait.lastAt) || 0);
-  const fast = since < 2200;
-  state.wait.lastAt = now;
-  state.wait.streak = fast ? (Number(state.wait.streak) || 0) + 1 : 0;
-
-  writeLine("...waiting...", "dim");
-
-  if (!fast) {
-    if (state.breach && state.breach.loc === "core.relic" && state.breach.mirrorMode === "rush") {
-      // Mirror: patient players forced to move; waiting too long adds pressure.
-      if (state.breach.mirrorDeadline && Date.now() > state.breach.mirrorDeadline) {
-        state.breach.mirrorPenalty = true;
-        state.flags.add("mirror_refused");
-        profiledTraceRise(1, "mirror linger");
-        trustAdjustHeat(1, "mirror linger");
-        state.breach.mirrorDeadline = Date.now() + 7000;
-      }
-    }
-    if (state.trace > 0) state.trace -= 1;
-    if (state.trace === 0) writeLine("trace is cold", "ok");
-    trustCoolDown(TRUST_COOLDOWN_ON_WAIT, "wait");
-    recordBehavior("patient");
-    recordRogueBehavior("careful");
-    watcherProfileTick();
-    storyChatTick();
-    markDirty();
-    return;
-  }
-  if (state.flags.has("glitch_stabilizer")) {
-    writeLine("You already anchored the thread.", "warn");
-    return;
-  }
-  if (state.flags.has("glitch_exploiter")) {
-    writeLine("The fragment is already bleeding power.", "dim");
-    return;
-  }
-  state.flags.add("glitch_exploiter");
-  state.flags.add("glitch_path_memory");
-  state.gc = Math.max(0, (Number(state.gc) || 0) + 25);
-  trustAdjustHeat(2, "glitch splice");
-  profiledTraceRise(1, "glitch splice");
-  setCorruptionLevel(Math.min(3, corruptionLevel() + 1));
-  chatPost({ channel: "#kernel", from: "rogue", body: "you pull the crack wider. residue banks, eyes notice." });
-  // Future exploit hook: amplified corruption could be weaponized later.
-  maybeLockTrustProfile("glitch");
-  markDirty();
-}
-
-function pingCommand(args) {
-  const region = state.currentRegion || (state.region && state.region.current);
-  if (region !== "introNet") {
-    writeLine("Ping drifts out; nothing notable answers.", "dim");
-    return;
-  }
-  islandPing(args);
-}
-
-function islandPing(args) {
-  const loc = state.loc || "";
-  // Safe failure: a tempting island-only button that raises heat, teaching risk without lasting punishment.
-  if (loc !== "island.grid" && loc !== "island.echo" && loc !== "home.hub") {
-    writeLine("The island beacon only hears pings nearby.", "dim");
-    return;
-  }
-  const mem = introMemoryState();
-  const now = Date.now();
-  const fast = now - (Number(mem.lastPingAt) || 0) < 2500;
-  mem.lastPingAt = now;
-  mem.pingCount = (Number(mem.pingCount) || 0) + 1;
-  mem.pingStreak = fast ? (Number(mem.pingStreak) || 0) + 1 : 1;
-
-  if (mem.pingCount === 1) writeLine("Beacon answers with a soft tone. Feels harmless.", "dim");
-  else if (fast) writeLine("Beacon heats up; echoes sharpen.", "warn");
-  else writeLine("Beacon hums warmer than before.", "warn");
-
-  // Designed stumble: spamming the beacon is tempting, but it raises heat safely to teach consequences.
-  trustAdjustHeat(1, "island ping");
-
-  if (mem.pingStreak >= 2) {
-    const gained = state.trace < state.traceMax ? 1 : 0;
-    if (gained > 0) {
-      state.trace += gained;
-      introTraceTeach("island ping");
-      watcherTraceReact("island ping");
-      writeLine(`TRACE +${gained} (${state.trace}/${state.traceMax})`, "warn");
-    }
-  }
-  if (mem.pingCount >= 2 && trustHeat() > 0) state.flags.add("intro_heat_memory"); // Trust as memory: later tone reacts.
-  markDirty();
-}
-
-function meshBridgeCommand() {
-  RegionManager.bootstrap({ silent: true });
-  if (meshBridgeActive()) {
-    writeLine("bridge already holds toward the mesh.", "dim");
-    return;
-  }
-
-  state.flags.add(MESH_BRIDGE_FLAG);
-  const targetRegion = "publicNet";
-  const def = REGION_DEFS.find((r) => r.id === targetRegion);
-  if (!state.region || typeof state.region !== "object") {
-    state.region = { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() };
-  }
-  if (!(state.region.unlocked instanceof Set)) state.region.unlocked = new Set(state.region.unlocked || []);
-  if (!(state.region.visited instanceof Set)) state.region.visited = new Set(state.region.visited || []);
-  if (!(state.region.pending instanceof Set)) state.region.pending = new Set(state.region.pending || []);
-  if (def) {
-    state.region.unlocked.add(targetRegion);
-    def.nodes.forEach((node) => state.region.pending.delete(node));
-    def.nodes.forEach((node) => {
-      if (!state.discovered.has(node)) state.discovered.add(node);
-    });
-  } else {
-    state.region.unlocked.add(targetRegion);
-  }
-  state.region.current = targetRegion;
-  state.currentRegion = targetRegion;
-  state.region.visited.add(targetRegion);
-  setZone(zoneForRegion(targetRegion));
-  onRegionEnter(def || { id: targetRegion });
-  writeLine("bridge settles; mesh hum turns distant.", "dim");
-  markDirty();
-  updateHud();
-}
-
-function stabilizeGlitch() {
+function spliceGlitch() {
   if (!state.flags.has("glitch_fragment_seen")) {
-    writeLine("No unstable fragment nearby.", "dim");
-    return;
-  }
-  if (state.flags.has("glitch_exploiter")) {
-    writeLine("Signal remembers you pulled it apart.", "warn");
-    return;
-  }
-  if (state.flags.has("glitch_stabilizer")) {
-    writeLine("Thread already steadied.", "dim");
-    return;
-  }
-  state.flags.add("glitch_stabilizer");
-  state.flags.add("glitch_path_memory");
-  setCorruptionLevel(Math.max(0, corruptionLevel() - 1));
-  trustCoolDown(1, "glitch stabilize");
-  chatPost({ channel: "#kernel", from: "watcher", body: "you steady the crack. some lines stay readable now." });
-  // Future repair hook: stabilized fragments could be rebuilt later without re-parsing lore.
-  markDirty();
-}
-
-function waitTick() {
-  const now = Date.now();
-  if (!state.wait || typeof state.wait !== "object") state.wait = { lastAt: 0, streak: 0 };
-
-  const since = now - (Number(state.wait.lastAt) || 0);
-  const fast = since < 2200;
-  state.wait.lastAt = now;
-  state.wait.streak = fast ? (Number(state.wait.streak) || 0) + 1 : 0;
-
-  writeLine("...waiting...", "dim");
-
-  if (!fast) {
-    if (state.breach && state.breach.loc === "core.relic" && state.breach.mirrorMode === "rush") {
-      // Mirror: patient players forced to move; waiting too long adds pressure.
-      if (state.breach.mirrorDeadline && Date.now() > state.breach.mirrorDeadline) {
-        state.breach.mirrorPenalty = true;
-        state.flags.add("mirror_refused");
-        profiledTraceRise(1, "mirror linger");
-        trustAdjustHeat(1, "mirror linger");
-        state.breach.mirrorDeadline = Date.now() + 7000;
-      }
-    }
-    if (state.trace > 0) state.trace -= 1;
-    if (state.trace === 0) writeLine("trace is cold", "ok");
-    trustCoolDown(TRUST_COOLDOWN_ON_WAIT, "wait");
-    recordBehavior("patient");
-    recordRogueBehavior("careful");
-    watcherProfileTick();
-    storyChatTick();
-    markDirty();
+    writeLine("Nothing to splice.", "dim");
     return;
   }
   if (state.flags.has("glitch_stabilizer")) {
