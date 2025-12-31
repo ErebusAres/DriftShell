@@ -539,7 +539,6 @@ function isCanonicalScriptName(name) {
   const parts = key.replace(/^drive:local\//i, "").replace(/\.s$/i, "").split(".");
   return parts.length >= 3 && parts[0] === handle && parts[1] === "local";
 }
-
 function scriptBaseFromKey(key) {
   const handle = state.handle ? String(state.handle) : "";
   let name = String(key || "").trim().replace(/\.s$/i, "");
@@ -1470,8 +1469,7 @@ async function syncLocalFolder() {
   let updated = 0;
   let unchanged = 0;
   let scratchUpdated = false;
-  const canonicalFiles = new Map(); // base -> canonical path
-  state.userScripts = {};
+  const pathToScript = new Map();
   try {
     for await (const entry of localFolderHandle.values()) {
       if (!entry || entry.kind !== "file") continue;
@@ -1485,37 +1483,20 @@ async function syncLocalFolder() {
       if (!lower.endsWith(".s")) continue;
       const file = await entry.getFile();
       const text = await file.text();
-      const base = scriptBaseFromKey(name);
-      const canonicalPath = `${state.handle}.local.${base}.s`;
-
-      if (isCanonicalScriptName(name)) {
-        canonicalFiles.set(base, canonicalPath);
-        seen.add(canonicalPath);
-        const secMatch = text.match(/@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i);
-        const sec = secMatch ? secMatch[1].toUpperCase() : "FULLSEC";
-        const savedKey = upsertUserScript(name, sec, text, "local");
-        updateLocalFileMeta(canonicalPath, file, savedKey);
-        if (!state.userScripts[savedKey] || state.userScripts[savedKey].code !== text || state.userScripts[savedKey].sec !== sec) {
-          updated += 1;
-        } else {
-          unchanged += 1;
-        }
-        continue;
-      }
-
-      const secMatch = text.match(/@sec\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i);
+      const base = localScriptNameFromFile(name);
+      if (!base) continue;
+      const secMatch = text.match(/@sec\\s+(FULLSEC|HIGHSEC|MIDSEC|LOWSEC|NULLSEC)/i);
       const sec = secMatch ? secMatch[1].toUpperCase() : "FULLSEC";
-      const existingCanon = canonicalFiles.get(base);
-      if (existingCanon) {
-        await renameLocalFile(name, existingCanon, text);
-        continue;
+      const savedKey = upsertUserScript(`${base}.s`, sec, text, "local");
+      pathToScript.set(name, savedKey);
+      seen.add(name);
+      const existing = state.userScripts[savedKey];
+      if (!existing || existing.code !== text || existing.sec !== sec) {
+        updated += 1;
+      } else {
+        unchanged += 1;
       }
-      await renameLocalFile(name, canonicalPath, text);
-      canonicalFiles.set(base, canonicalPath);
-      seen.add(canonicalPath);
-      const savedKey = upsertUserScript(canonicalPath, sec, text, "local");
-      updateLocalFileMeta(canonicalPath, file, savedKey);
-      added += 1;
+      updateLocalFileMeta(name, file, savedKey);
     }
   } catch (err) {
     writeLine("Local sync failed: " + (err && err.message ? err.message : "error"), "error");
@@ -1526,6 +1507,8 @@ async function syncLocalFolder() {
     Array.from(localFileMeta.keys()).forEach((key) => {
       if (seen.has(key)) return;
       if (key === LOCAL_SCRATCH_FILE) return;
+      const meta = localFileMeta.get(key);
+      if (meta && meta.scriptKey && state.userScripts) delete state.userScripts[meta.scriptKey];
       localFileMeta.delete(key);
     });
   }
@@ -1619,35 +1602,8 @@ async function mirrorDownloadToLocalFolder(locName, fileName, entry) {
 }
 
 async function mirrorUserScriptToLocalFolder(scriptName, code) {
-  if (!shouldMirrorLocal()) return;
-  if (!supportsLocalFolder() || !window.isSecureContext) return;
-  if (!localFolderHandle) return;
-  const perm = await ensureLocalFolderPermission(true);
-  if (!perm.ok) {
-    writeLine("Local sync blocked: permission denied.", "warn");
-    await refreshLocalFolderUi();
-    return;
-  }
-  const key = String(scriptName || "").trim();
-  if (!key) return;
-  const shortPath = localPathForScript(key);
-  const content = String(code || "");
-  try {
-    if (shortPath) {
-      await writeLocalMirrorFile(shortPath, content);
-      localFileMeta.set(shortPath, { lastModified: Date.now(), size: content.length, scriptKey: key });
-      return;
-    }
-    // Export-only: write to a mirror subfolder that is not watched to prevent re-import loops.
-    const dir = await localFolderHandle.getDirectoryHandle(LOCAL_MIRROR_DIR, { create: true });
-    const mirrorName = `${scriptBaseFromKey(key) || "script"}.s`;
-    const fileHandle = await dir.getFileHandle(mirrorName, { create: true });
-    const writable = await fileHandle.createWritable();
-    await writable.write(content);
-    await writable.close();
-  } catch (err) {
-    writeLine("Local script save failed: " + (err && err.message ? err.message : "error"), "warn");
-  }
+  // Local disk files stay as simple names only; do not mirror in-game identities to disk.
+  return;
 }
 
 async function mirrorScratchToLocalFolder(text) {
@@ -1670,24 +1626,6 @@ async function mirrorScratchToLocalFolder(text) {
 function updateLocalFileMeta(name, file, scriptKey) {
   if (!file) return;
   localFileMeta.set(name, { lastModified: file.lastModified || 0, size: file.size || 0, scriptKey: scriptKey || null });
-}
-
-async function renameLocalFile(oldName, newName, content) {
-  try {
-    if (oldName !== newName) {
-      try {
-        await localFolderHandle.removeEntry(newName);
-      } catch {}
-    }
-    await writeLocalMirrorFile(newName, content);
-    if (oldName !== newName) {
-      try {
-        await localFolderHandle.removeEntry(oldName);
-      } catch {}
-    }
-  } catch (err) {
-    writeLine("Local rename failed: " + (err && err.message ? err.message : "error"), "warn");
-  }
 }
 
 async function applyLocalScratchUpdate(text) {
@@ -1744,8 +1682,6 @@ async function pollLocalFolderChanges() {
     if (!entry || entry.kind !== "file") continue;
     const name = String(entry.name || "");
     const lower = name.toLowerCase();
-    if (name === LOCAL_MIRROR_DIR || name.startsWith(`${LOCAL_MIRROR_DIR}/`)) continue;
-    if (isCanonicalScriptName(name)) continue;
     const isScratch = lower === LOCAL_SCRATCH_FILE;
     seen.add(name);
 
@@ -1805,7 +1741,6 @@ async function pollLocalFolderChanges() {
     Array.from(localFileMeta.keys()).forEach((key) => {
       if (seen.has(key)) return;
       if (key === LOCAL_SCRATCH_FILE) return;
-      if (key === LOCAL_MIRROR_DIR || key.startsWith(`${LOCAL_MIRROR_DIR}/`)) return;
       localFileMeta.delete(key);
     });
   }
