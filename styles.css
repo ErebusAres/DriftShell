@@ -106,23 +106,23 @@ body.booting .line {
 
 body.corrupt,
 body.corrupt1 {
-  filter: hue-rotate(6deg) saturate(1.05);
+  filter: hue-rotate(6deg) saturate(1.03);
 }
 
 body.corrupt2 {
-  filter: hue-rotate(10deg) saturate(1.08) contrast(1.02);
+  filter: hue-rotate(10deg) saturate(1.06) contrast(1.02);
 }
 
 body.corrupt3 {
-  filter: hue-rotate(24deg) saturate(1.35) contrast(1.12);
+  filter: hue-rotate(14deg) saturate(1.1) contrast(1.04);
 }
 
 body.corrupt3 #shell {
-  animation: corruptJitter 2.4s infinite;
+  animation: corruptJitter 3.6s infinite;
 }
 
 body.corrupt3 #shell::after {
-  opacity: 0.26;
+  opacity: 0.18;
 }
 
 #app {
