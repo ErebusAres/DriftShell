@@ -2412,7 +2412,7 @@ function npcReply(npcId, body) {
       chatPost({
         channel: dmChannel(npcId),
         from: "juniper",
-        body: "Clean enough. +50GC. Tip: breach `archives.arc` once you've got the ember phrase.",
+        body: "Clean enough. +50GC. Tip: decode the ember note when you find it. New routes follow.",
       });
       updateHud();
       return;
@@ -3470,7 +3470,7 @@ const LOCS = {
           "FROM: SWITCHBOARD",
           "SUBJ: ember signal",
           "",
-          "We caught a pulse in the Drift. It points at the Sable Archive.",
+          "We caught a pulse in the Drift. It points deeper into the mesh.",
           "Follow the ember. Bring back what you can. Decide if it should",
           "leave the net or stay buried.",
           "",
@@ -6888,7 +6888,7 @@ const TUTORIAL_STEPS = [
       chatPost({
         channel: "#kernel",
         from: "juniper",
-        body: "You want the archive? You'll need a mask. Pull `spoof.s` and run it.",
+        body: "You want deeper routes? You'll need a mask. Pull `spoof.s` and run it.",
       }),
   },
   {
@@ -6928,30 +6928,6 @@ const TUTORIAL_STEPS = [
       }),
   },
   {
-    id: "t_archive",
-    title: "Breach The Archive",
-    hint: "Run `breach archives.arc`, then `unlock mask.dat`, then `connect archives.arc`.",
-    check: () => state.unlocked.has("archives.arc") && state.loc === "archives.arc",
-    onStart: () =>
-      chatPost({
-        channel: "#kernel",
-        from: "switchboard",
-        body: "The Sable Archive is next. Bring your mask and don't spike trace.",
-      }),
-  },
-  {
-    id: "t_b64",
-    title: "Pull The Lattice Sigil",
-    hint: "Run `cat key.b64`, then `decode b64`.",
-    check: () => state.flags.has("lattice_sigil"),
-    onStart: () =>
-      chatPost({
-        channel: "#kernel",
-        from: "archivist",
-        body: "There is a sigil folded into base64. Read it clean.",
-      }),
-  },
-  {
     id: "t_sniffer",
     title: "Find The Weaver",
     hint: "From exchange: `connect public.exchange`, `download sniffer.s`, then `call kit.sniffer`.",
@@ -6985,6 +6961,45 @@ const TUTORIAL_STEPS = [
         channel: "#kernel",
         from: "weaver",
         body: "Splice requires three pieces: badge.sig + mask.dat + weaver.mark.",
+      }),
+  },
+  {
+    id: "t_corporate_wait",
+    title: "Wait For New Routes",
+    hint: "Run `scan` until new routes appear.",
+    check: () => {
+      RegionManager.bootstrap({ silent: true });
+      return RegionManager.isRegionUnlocked("corporateNet");
+    },
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Hold. When the next span answers, it'll show up in scan.",
+      }),
+  },
+  {
+    id: "t_archive",
+    title: "Breach The Archive",
+    hint: "Run `breach archives.arc`, then `unlock mask.dat`, then `connect archives.arc`.",
+    check: () => state.unlocked.has("archives.arc") && state.loc === "archives.arc",
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "The archive is answering now. Bring your mask and don't spike trace.",
+      }),
+  },
+  {
+    id: "t_b64",
+    title: "Pull The Lattice Sigil",
+    hint: "Run `cat key.b64`, then `decode b64`.",
+    check: () => state.flags.has("lattice_sigil"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "archivist",
+        body: "There is a sigil folded into base64. Read it clean.",
       }),
   },
   {
@@ -7196,9 +7211,14 @@ function triggerNarrativeStepForLoc(locName) {
   });
   state.narrativeHint = `${step.title || step.name}: ${cue}`;
   updateHud();
-  // Story progression can also be driven by reaching key locs.
-  if (state.storyState && state.storyState.current === step.id) {
-    storyAdvanceToNext(`loc:${locName}`);
+  // Story progression: reaching a *later* step's node can advance you up to that step,
+  // but reaching a node within your current step should not auto-advance the narrative.
+  if (state.storyState) {
+    const currentIdx = narrativeStepIndex(state.storyState.current);
+    const stepIdx = narrativeStepIndex(step.id);
+    if (currentIdx < stepIdx) {
+      storyEnsureAtLeast(step.id, `loc:${locName}`);
+    }
   }
 }
 
@@ -7981,7 +8001,12 @@ function runScript(name, args, caller) {
 
   // Some scripts affect loc requirements via flags/items; reflect that in chat.
   if (script.owner !== "scripts.trust" && script.name === "tracer") {
-    chatPost({ channel: "#kernel", from: "switchboard", body: "Signals updated. Try `breach archives.arc` next." });
+    RegionManager.bootstrap({ silent: true });
+    if (RegionManager.isNodeVisible("archives.arc") || RegionManager.isRegionUnlocked("corporateNet")) {
+      chatPost({ channel: "#kernel", from: "switchboard", body: "Signals updated. The archive is answering now." });
+    } else {
+      chatPost({ channel: "#kernel", from: "switchboard", body: "Signals updated. Run `scan` to see what's new." });
+    }
   }
   if (script.owner === "scripts.trust" && script.name === "scan") {
     tutorialNextHint();
@@ -8098,7 +8123,7 @@ function storyChatTick() {
     chatPost({
       channel: "#kernel",
       from: "switchboard",
-      body: "Gate open. Next target is `archives.arc` (needs `mask.dat` + tracer signal).",
+      body: "Gate open. Stay in Public Net: pull tools, follow new pings, and keep scan current.",
     });
     return;
   }
