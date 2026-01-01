@@ -113,8 +113,14 @@ const REGION_STORY_GATES = {
 };
 
 function narrativeStepIndex(stepId) {
-  const idx = NARRATIVE_STEPS.findIndex((s) => s.id === stepId || s.name === stepId || s.title === stepId);
+  const idx = NARRATIVE_STEPS.filter((s) => s && typeof s === "object" && s.id).findIndex((s) => s.id === stepId);
   return idx === -1 ? 0 : idx;
+}
+
+function narrativeStepByLoc(locName) {
+  return NARRATIVE_STEPS.filter((s) => s && typeof s === "object" && s.id).find((s) =>
+    Array.isArray(s.nodes) ? s.nodes.includes(locName) : false
+  );
 }
 
 // Regions only answer once the narrative has reached their gate beat.
@@ -6834,7 +6840,7 @@ const TUTORIAL_STEPS = [
     title: "Open The Training Node",
     hint:
       "Run `breach training.node`, then `unlock <handle>`, `unlock WELCOME`, `unlock <hex3>`, `unlock <handle> WELCOME HOME <hex3>`, then `connect training.node`.",
-    check: () => state.unlocked.has("training.node") && state.loc === "training.node",
+    check: () => state.unlocked.has("training.node"),
     onStart: () =>
       chatPost({
         channel: "#kernel",
@@ -6846,7 +6852,7 @@ const TUTORIAL_STEPS = [
     id: "t_exchange",
     title: "Reach The Exchange",
     hint: "Run `connect public.exchange`.",
-    check: () => state.loc === "public.exchange",
+    check: () => state.flags.has("seen_public.exchange") || state.loc === "public.exchange",
     onStart: () =>
       chatPost({
         channel: "#kernel",
@@ -7056,6 +7062,13 @@ function tutorialCurrent() {
 function tutorialAdvance() {
   if (!state.tutorial.enabled) return;
 
+  // If the player has already cleared the early route, ensure the story gate is consistent
+  // so region unlocks reflect progression rather than stale save state.
+  if (state.tutorial.completed.has("t_exchange") || state.flags.has("seen_public.exchange")) {
+    storyEnsureAtLeast("mesh_explore", "tutorial:exchange");
+    RegionManager.bootstrap({ silent: true });
+  }
+
   while (state.tutorial.stepIndex < TUTORIAL_STEPS.length) {
     const step = TUTORIAL_STEPS[state.tutorial.stepIndex];
     if (!step) break;
@@ -7065,6 +7078,10 @@ function tutorialAdvance() {
     }
     if (step.check()) {
       state.tutorial.completed.add(step.id);
+      if (step.id === "t_exchange") {
+        storyEnsureAtLeast("mesh_explore", "tutorial:exchange");
+        RegionManager.bootstrap({ silent: false });
+      }
       state.tutorial.stepIndex += 1;
       continue;
     }
@@ -7170,7 +7187,7 @@ function listInventory() {
 
 // Notify when a narrative step is reached for the first time.
 function triggerNarrativeStepForLoc(locName) {
-  const step = NARRATIVE_STEPS.find((s) => (s.nodes || []).includes(locName));
+  const step = narrativeStepByLoc(locName);
   if (!step) return;
   const key = `narrative_step_${step.id || step.name || step.title}`;
   if (state.flags.has(key)) return;
@@ -7410,16 +7427,18 @@ function ensureStoryState() {
 
 function storyCurrentStep() {
   ensureStoryState();
-  return NARRATIVE_STEPS.find((s) => s.id === state.storyState.current) || NARRATIVE_STEPS[0];
+  const steps = NARRATIVE_STEPS.filter((s) => s && typeof s === "object" && s.id);
+  return steps.find((s) => s.id === state.storyState.current) || steps[0] || NARRATIVE_STEPS[0];
 }
 
 function storyAdvanceToNext(reason) {
   ensureStoryState();
   const current = storyCurrentStep();
   if (current && current.id) state.storyState.completed.add(current.id);
+  const steps = NARRATIVE_STEPS.filter((s) => s && typeof s === "object" && s.id);
   const nextIdx = narrativeStepIndex(current ? current.id : null) + 1;
-  const next = NARRATIVE_STEPS[nextIdx] || current;
-  state.storyState.current = next.id || current.id;
+  const next = steps[nextIdx] || current;
+  state.storyState.current = (next && next.id) || current.id;
   const cue = NARRATIVE_CUES[next.id] || NARRATIVE_CUES[next.name] || next.summary || "signal moves";
   chatPost({
     channel: "#kernel",
@@ -7429,6 +7448,21 @@ function storyAdvanceToNext(reason) {
   state.narrativeHint = `${next.title || next.name}: ${cue}`;
   if (reason) state.storyState.flags.add(`advance:${reason}`);
   markDirty();
+}
+
+function storyEnsureAtLeast(stepId, reason) {
+  ensureStoryState();
+  const targetIdx = narrativeStepIndex(stepId);
+  let currentIdx = narrativeStepIndex(state.storyState.current);
+  let guard = 0;
+  while (currentIdx < targetIdx && guard < 10) {
+    const before = state.storyState.current;
+    storyAdvanceToNext(reason);
+    if (state.storyState.current === before) break;
+    currentIdx = narrativeStepIndex(state.storyState.current);
+    guard += 1;
+  }
+  return currentIdx >= targetIdx;
 }
 
 // Lightweight dispatcher: move the story when meaningful actions land.
@@ -8013,6 +8047,11 @@ function storyChatTick() {
   if (!state.handle) return;
   RegionManager.bootstrap({ silent: true });
   setZone(zoneForRegion(state.currentRegion || (state.region && state.region.current) || "isolated"));
+  // Reconcile older saves: clearing the training node implies the story has left the island.
+  if (state.flags.has("tutorial_training_done") || state.unlocked.has("training.node")) {
+    storyEnsureAtLeast("mesh_explore", "tutorial:training");
+    RegionManager.bootstrap({ silent: true });
+  }
   triggerNarrativeStepForLoc(state.loc);
   behaviorToneNudge();
   if (state.loc === "home.hub" && !state.flags.has("chat_intro")) {
@@ -8036,6 +8075,8 @@ function storyChatTick() {
       const added = discover(["island.echo"]);
       if (added.length) chatPost({ channel: "#kernel", from: "switchboard", body: "Island echo opened. `connect island.echo` for extra guidance." });
     }
+    storyEnsureAtLeast("mesh_explore", "tutorial:training");
+    RegionManager.bootstrap({ silent: false });
     return;
   }
   if (state.unlocked.has("pier.gate") && !state.flags.has("chat_pier_gate")) {
