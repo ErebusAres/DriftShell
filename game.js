@@ -185,7 +185,7 @@ const REGION_DEFS = [
     id: "secureCore",
     name: "Secure Core",
     nodes: ["core.relic", "rogue.core"],
-    unlock: { requires: ["corporateNet"], flags: ["touched_relic", "glitch_phrase_ready"], nodes: [] },
+    unlock: { requires: ["corporateNet"], flags: ["forked"], nodes: [] },
     entry: ["A rogue process echoes here. It listens for chants and trust."],
   },
   {
@@ -2471,7 +2471,7 @@ function npcReply(npcId, body) {
       chatPost({
         channel: dmChannel(npcId),
         from: "juniper",
-        body: "You already cashed the only job I had. Try the archive if you're hungry.",
+        body: "You already cashed the only job I had. Stay in the exchange and keep scanning; pull tools when you see them.",
       });
     }
     return;
@@ -4283,10 +4283,10 @@ const LOCS = {
       },
     },
   },
-  "deep.slate": {
-    title: "DEEP.SLATE",
+  "lattice.cache": {
+    title: "LATTICE.CACHE",
     desc: [
-      "A slate of old relays stacked under the archive.",
+      "A cache of old relays stacked under the archive.",
       "Signals smear here; patience and trust keep them readable.",
     ],
     requirements: { flags: ["trace_open", "lattice_sigil"], trust: 2 },
@@ -7003,6 +7003,18 @@ const TUTORIAL_STEPS = [
       }),
   },
   {
+    id: "t_fork",
+    title: "Fork The Relay",
+    hint: "Run `download fork.s`, then `call kit.fork`.",
+    check: () => state.flags.has("forked"),
+    onStart: () =>
+      chatPost({
+        channel: "#kernel",
+        from: "switchboard",
+        body: "Split the relay channel. Forking exposes the core route when you're ready.",
+      }),
+  },
+  {
     id: "t_cache",
     title: "Open Lattice.Cache",
     hint: "Run `breach lattice.cache`, then `unlock SIGIL: LATTICE`, then `connect lattice.cache`.",
@@ -8068,9 +8080,24 @@ function storyChatTick() {
   RegionManager.bootstrap({ silent: true });
   setZone(zoneForRegion(state.currentRegion || (state.region && state.region.current) || "isolated"));
   // Reconcile older saves: clearing the training node implies the story has left the island.
+  if (state.unlocked.has("training.node") && !state.flags.has("tutorial_training_done")) {
+    state.flags.add("tutorial_training_done");
+  }
   if (state.flags.has("tutorial_training_done") || state.unlocked.has("training.node")) {
     storyEnsureAtLeast("mesh_explore", "tutorial:training");
     RegionManager.bootstrap({ silent: true });
+  }
+  // Progression cohesion: once the operator has the full relic kit (fork + keys),
+  // advance into the core chapter so the Secure Core region can become visible naturally.
+  if (state.storyState && state.storyState.current === "glitch_arc") {
+    const relicReady =
+      state.flags.has("forked") &&
+      state.inventory.has("relay.shard") &&
+      state.inventory.has("relic.key");
+    if (relicReady) {
+      storyEnsureAtLeast("rogue_finale", "ready:relic");
+      RegionManager.bootstrap({ silent: true });
+    }
   }
   triggerNarrativeStepForLoc(state.loc);
   behaviorToneNudge();
