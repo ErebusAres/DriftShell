@@ -4693,12 +4693,7 @@ function listLocs() {
       const noLocks = !!(node && Array.isArray(node.locks) && node.locks.length === 0);
       const unlocked = state.unlocked.has(locName) || noLocks;
       const openNow = reqOk && unlocked;
-      const tags = [openNow ? "open" : "locked"];
-      if (!openNow) {
-        if (!reqOk) tags.push("req");
-        else if (!state.unlocked.has(locName) && node && Array.isArray(node.locks) && node.locks.length) tags.push("breach");
-      }
-      writeLine(`${locName} [${tags.join(", ")}] :: ${title}`, "dim");
+      writeLine(`${locName} [${openNow ? "open" : "locked"}] :: ${title}`, "dim");
     });
 }
 
