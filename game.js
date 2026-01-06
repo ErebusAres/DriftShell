@@ -19,6 +19,7 @@ const TRUST_MAX_LEVEL = 4;
 const TRUST_MIN_LEVEL = 1;
 const TRUST_HEAT_THRESHOLD = 6;
 const TRUST_COOLDOWN_ON_WAIT = 2;
+const TRUST_RECOVERY_MIN_MS = 2200;
 const ZONE_NAMES = ["isolated", "local", "pressure", "core", "unstable"];
 // Trust/heat/trace framing (in-world, never shown as glossary):
 // - Trust: long-memory of the network (changes are rare and costly).
@@ -343,6 +344,56 @@ function trustStatusLabel() {
   return `trust ${level}/${TRUST_MAX_LEVEL} (${tier}, heat ${heat}/${TRUST_HEAT_THRESHOLD})`;
 }
 
+function ensureTrustRecovery() {
+  if (!state.trustRecovery || typeof state.trustRecovery !== "object") {
+    state.trustRecovery = { calmTicks: 0, lastCalmAt: 0 };
+  }
+  return state.trustRecovery;
+}
+
+function trustRecoveryThreshold(level) {
+  if (level <= 1) return 3;
+  if (level === 2) return 4;
+  if (level === 3) return 5;
+  return Number.POSITIVE_INFINITY;
+}
+
+function resetTrustRecovery() {
+  const rec = ensureTrustRecovery();
+  rec.calmTicks = 0;
+  rec.lastCalmAt = 0;
+}
+
+function maybeRestoreTrust(reason) {
+  if (reason !== "wait" && reason !== "anchor read") return;
+  if (trustHeat() > 0) return;
+  const level = trustLevel();
+  if (level >= TRUST_MAX_LEVEL) return;
+  const region = state.currentRegion || (state.region && state.region.current);
+  if (!region || region === "introNet") return;
+  const rec = ensureTrustRecovery();
+  const now = Date.now();
+  if (now - (Number(rec.lastCalmAt) || 0) < TRUST_RECOVERY_MIN_MS) return;
+  rec.lastCalmAt = now;
+  rec.calmTicks = Math.max(0, Number(rec.calmTicks) || 0) + 1;
+  if (rec.calmTicks < trustRecoveryThreshold(level)) return;
+  rec.calmTicks = 0;
+  state.trust.level = Math.min(TRUST_MAX_LEVEL, level + 1);
+  chatSystem(`trust steadies (${reason}). level ${state.trust.level}/${TRUST_MAX_LEVEL}`);
+}
+
+function watcherTrustMemory() {
+  if (!state.flags || !(state.flags instanceof Set)) return;
+  state.flags.add("trust_memory");
+  if (state.flags.has("trust_memory_hint")) return;
+  state.flags.add("trust_memory_hint");
+  chatPost({
+    channel: "#kernel",
+    from: "watcher",
+    body: "trust remembers the drop.",
+  });
+}
+
 function trustAdjustHeat(delta, reason) {
   if (!state.trust || typeof state.trust !== "object") state.trust = { level: 2, heat: 0, lastScanAt: 0 };
   const zone = currentZone();
@@ -373,6 +424,7 @@ function trustAdjustHeat(delta, reason) {
     state.trust.heat = Math.max(0, next - TRUST_HEAT_THRESHOLD);
     if (state.trust.level > TRUST_MIN_LEVEL) {
       state.trust.level -= 1;
+      resetTrustRecovery();
       // Persist consequence: later regions will react to lower trust via tone and corruption.
       chatPost({
         channel: "#kernel",
@@ -421,6 +473,7 @@ function trustCoolDown(amount, reason) {
       writeLine("stillness gives the grid room to forget.", "dim");
     }
   }
+  if (next === 0) maybeRestoreTrust(reason || "wait");
   markDirty();
   updateHud();
 }
@@ -3048,6 +3101,7 @@ const state = {
     queue: [],
   },
   trust: { level: 2, heat: 0, lastScanAt: 0 },
+  trustRecovery: { calmTicks: 0, lastCalmAt: 0 },
   region: { current: null, unlocked: new Set(), visited: new Set(), pending: new Set() },
   currentRegion: null,
   narrativeHint: null,
@@ -8410,6 +8464,7 @@ function getSaveData() {
     lastCipher: state.lastCipher,
     localSync: state.localSync,
     trust: state.trust,
+    trustRecovery: state.trustRecovery,
     trustProfile: state.trustProfile,
     zone: state.zone,
     region: {
@@ -8568,6 +8623,13 @@ function loadState(options) {
           lastScanAt: Number(data.trust.lastScanAt) || 0,
         }
       : { level: 2, heat: 0, lastScanAt: 0 };
+  state.trustRecovery =
+    data.trustRecovery && typeof data.trustRecovery === "object"
+      ? {
+          calmTicks: Math.max(0, Number(data.trustRecovery.calmTicks) || 0),
+          lastCalmAt: Number(data.trustRecovery.lastCalmAt) || 0,
+        }
+      : state.trustRecovery || { calmTicks: 0, lastCalmAt: 0 };
   state.region =
     data.region && typeof data.region === "object"
       ? {
